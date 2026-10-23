@@ -53,7 +53,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test \"test/*.test.*js\""
+    "test:run": "node --test test/agent.test.mjs test/cjs.test.cjs"
   },
   "keywords": [
     "agent",
