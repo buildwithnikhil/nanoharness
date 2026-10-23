@@ -1,6 +1,6 @@
 {
   "name": "nanoharness",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Zero-dependency, provider-agnostic agent harness for small apps. Bring your own tools; ships an Anthropic adapter.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -53,7 +53,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test test/agent.test.mjs test/cjs.test.cjs"
+    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/cjs.test.cjs"
   },
   "keywords": [
     "agent",
