@@ -1,0 +1,96 @@
+{
+  "name": "nanoharness",
+  "version": "1.0.1",
+  "description": "Zero-dependency, provider-agnostic agent harness for small apps. Bring your own tools; ships an Anthropic adapter.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./tools-fs": {
+      "import": {
+        "types": "./dist/tools-fs.d.ts",
+        "default": "./dist/tools-fs.js"
+      },
+      "require": {
+        "types": "./dist/tools-fs.d.cts",
+        "default": "./dist/tools-fs.cjs"
+      }
+    },
+    "./zod": {
+      "import": {
+        "types": "./dist/zod.d.ts",
+        "default": "./dist/zod.js"
+      },
+      "require": {
+        "types": "./dist/zod.d.cts",
+        "default": "./dist/zod.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && npm run test:run",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "test:run": "node --test \"test/*.test.*js\""
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "harness",
+    "tools",
+    "anthropic",
+    "claude",
+    "tool-use",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "peerDependencies": {
+    "zod": ">=4"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsup": "^9.0.0",
+    "typescript": "~5.9",
+    "zod": "^4.6.7"
+  },
+  "author": "buildwithnikhil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/buildwithnikhil/nanoharness.git"
+  },
+  "homepage": "https://github.com/buildwithnikhil/nanoharness#readme",
+  "bugs": {
+    "url": "https://github.com/buildwithnikhil/nanoharness/issues"
+  }
+}
