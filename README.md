@@ -5,6 +5,7 @@ A lightweight, zero-dependency agent harness for small apps. You give it a model
 - **Zero runtime dependencies.** The Anthropic adapter uses `fetch`.
 - **Provider-agnostic.** A model provider is one method: `complete(request) → response`.
 - **Bring your own tools.** There are no built-in tools and no shell access. An optional, sandboxed file tool set is available at `nanoharness/tools-fs`.
+- **Scales up when you need it.** Multi-agent orchestration, planning, workflow graphs and persistence are opt-in subpath imports (`nanoharness/agents`, `/graph`, `/store`). Apps that don't import them don't pay for them.
 - **ESM and CJS**, with types. Node 18 or later.
 
 ```sh
@@ -34,6 +35,85 @@ const { finalText } = await run({
 });
 console.log(finalText);
 ```
+
+## Multi-agent, workflows and persistence
+
+All of this is built from the same loop and has no extra dependencies. Import only what you use.
+
+### Agents and orchestration: `nanoharness/agents`
+
+```ts
+import { defineAgent, pipeline, parallel } from "nanoharness/agents";
+
+const researcher = defineAgent({ name: "researcher", adapter, system: "Research the topic.", tools: [searchTool] });
+const writer = defineAgent({ name: "writer", adapter, system: "Write a short summary." });
+
+// 1. Orchestrator: a lead agent that delegates to workers, which it sees as tools.
+const lead = defineAgent({
+  name: "lead",
+  adapter,
+  system: "Delegate research, then answer.",
+  tools: [researcher.asTool("Researches a topic and reports findings")],
+  onEvent: (agent, ev) => console.log(agent, ev.type), // trace every agent's loop
+});
+await lead.run("What changed in Node 24?");
+
+// 2. Pipeline: each agent gets the previous agent's answer.
+const { finalText } = await pipeline([researcher, writer], "Node 24");
+
+// 3. Parallel: run agents concurrently with a limit. Failures are reported per agent.
+const results = await parallel([researcher, researcher], ["Node 22", "Node 24"], { concurrency: 2 });
+```
+
+A sub-agent that does not finish (turn limit, rejected by `evaluate`, aborted) is reported to its caller as a tool error instead of a half answer. Each agent can have its own model adapter, tools, guardrails and `maxTurns`, so a cheap model can do the research while a stronger one writes.
+
+**Planning.** `createPlanTool()` gives an agent an `update_plan` tool for keeping a step list. Read it back with `plan.get()`, and pass a `store` to persist it across runs.
+
+```ts
+const plan = createPlanTool({ store });
+defineAgent({ name: "planner", adapter, tools: [plan.tool, ...otherTools] });
+```
+
+### Workflow graphs: `nanoharness/graph`
+
+For flows where you decide the steps and the model does the work inside them. Nodes are plain functions over a shared state, so a node can call an agent, a tool or ordinary code.
+
+```ts
+import { createGraph, END } from "nanoharness/graph";
+
+const graph = createGraph<{ topic: string; draft?: string; ok?: boolean }>({
+  entry: "write",
+  edges: { write: "review" },
+  maxSteps: 10,
+  nodes: {
+    write: async ({ state }) => ({ state: { draft: (await writer.run(state.topic)).finalText } }),
+    review: async ({ state }) => {
+      const ok = (await reviewer.run(state.draft!)).finalText.includes("APPROVED");
+      return { state: { ok }, next: ok ? END : "write" }; // loop back until approved
+    },
+  },
+});
+
+const { state, path, status } = await graph.run({ topic: "cats" });
+```
+
+A node returns `{ state, next }`. `state` is merged into the shared state, and `next` is a node name or `END`. If it omits `next`, `edges[node]` is used, otherwise the run ends. `status` is `done`, `max_steps` or `aborted`.
+
+Pass `store` and `id` and the graph saves a checkpoint after every node. If the process crashes, run it again with the same `id` and it resumes at the node that failed. Pass `{ fresh: true }` to `run()` to ignore the checkpoint. The checkpoint is deleted when a run finishes.
+
+### Persistence: `nanoharness/store`
+
+```ts
+import { fileStore, memoryStore, session } from "nanoharness/store";
+
+const store = fileStore("./.agent-data"); // one JSON file per key, written atomically
+
+const chat = session(store, "user-42");
+await chat.run({ adapter, prompt: "I am Ada" });
+await chat.run({ adapter, prompt: "Who am I?" }); // remembers, even after a restart
+```
+
+A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `fileStore` and `memoryStore` are the only implementations shipped.
 
 ## API
 
@@ -141,9 +221,9 @@ const myAdapter: Adapter = {
 
 Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it.
 
-## Not in v1
+## Not included
 
-Token-level streaming, shell tools, sub-agents, memory and context compaction. The event stream is additive, so token deltas can be added later without breaking the API.
+Token-level streaming, shell tools, automatic memory summarisation and context compaction, and a database-backed store. The event stream is additive, so token deltas can be added later without breaking the API.
 
 ## License
 
