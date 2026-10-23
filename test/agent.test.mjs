@@ -126,8 +126,8 @@ test("fs tools stay inside root and write is opt-in", async () => {
   assert.deepEqual(ro.map((t) => t.name), ["read_file", "list_dir"]);
   const read = ro.find((t) => t.name === "read_file");
   assert.equal(await read.run({ path: "a.txt" }, {}), "hello");
-  assert.throws(() => read.run({ path: "../x" }, {}), /escapes root/);
-  assert.throws(() => read.run({ path: "link/anything" }, {}), /escapes root/);
+  await assert.rejects(read.run({ path: "../x" }, {}), /escapes root/);
+  await assert.rejects(read.run({ path: "link/anything" }, {}), /escapes root/);
 
   const rw = createFsTools({ root: dir, allowWrite: true });
   const write = rw.find((t) => t.name === "write_file");

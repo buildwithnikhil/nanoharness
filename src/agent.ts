@@ -1,10 +1,10 @@
 import type { Adapter, ContentBlock, Message, ToolResultBlock, ToolUseBlock, Usage } from "./types.js";
-import type { Tool } from "./tool.js";
+import type { Budget, Tool, ToolContext } from "./tool.js";
 import { validate } from "./validate.js";
 
 export type Decision = "allow" | "deny" | { deny: string };
 
-export type StopReason = "end_turn" | "max_turns" | "max_tokens" | "aborted" | "eval_failed";
+export type StopReason = "end_turn" | "max_turns" | "max_tokens" | "aborted" | "eval_failed" | "budget_exceeded";
 
 /** `true` accepts the answer; `false` or `{ feedback }` rejects it and asks the model to try again. */
 export type EvalResult = boolean | { feedback: string };
@@ -36,6 +36,14 @@ export interface RunOptions {
   evaluate?: (ctx: { finalText: string; messages: Message[] }) => EvalResult | Promise<EvalResult>;
   /** How many times a rejected answer may be retried. Default 2. */
   maxEvalRetries?: number;
+  /** Runs up to this many tool calls from one model turn at the same time. Default 1 (in order). */
+  toolConcurrency?: number;
+  /** Most model calls allowed in total, counting every sub-agent. Stops with `budget_exceeded`. Default: no limit. */
+  maxModelCalls?: number;
+  /** Nesting level, set by `defineAgent` for sub-agents. Not normally set by hand. */
+  depth?: number;
+  /** Budget inherited from a parent run, set by `defineAgent` for sub-agents. Not normally set by hand. */
+  budget?: Budget;
 }
 
 export interface RunResult {
@@ -58,9 +66,9 @@ function stringify(v: unknown): string {
   return JSON.stringify(v);
 }
 
-async function runTool(tool: Tool, input: unknown, opts: RunOptions): Promise<unknown> {
+async function runTool(tool: Tool, input: unknown, opts: RunOptions, base: ToolContext): Promise<unknown> {
   const ms = opts.toolTimeoutMs;
-  if (!ms) return tool.run(input, { signal: opts.signal });
+  if (!ms) return tool.run(input, { ...base, signal: opts.signal });
 
   const ctl = new AbortController();
   const onAbort = () => ctl.abort();
@@ -73,7 +81,7 @@ async function runTool(tool: Tool, input: unknown, opts: RunOptions): Promise<un
     }, ms);
   });
   try {
-    return await Promise.race([Promise.resolve(tool.run(input, { signal: ctl.signal })), timeout]);
+    return await Promise.race([Promise.resolve(tool.run(input, { ...base, signal: ctl.signal })), timeout]);
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onAbort);
@@ -85,12 +93,13 @@ async function execute(
   tools: Map<string, Tool>,
   opts: RunOptions,
   seen: Map<string, number>,
+  base: ToolContext,
 ): Promise<ToolResultBlock> {
   let isError = false;
   let content: string;
 
   try {
-    content = await dispatch(call, tools, opts, seen);
+    content = await dispatch(call, tools, opts, seen, base);
   } catch (e) {
     isError = true;
     content = e instanceof Error ? e.message : String(e);
@@ -109,6 +118,7 @@ async function dispatch(
   tools: Map<string, Tool>,
   opts: RunOptions,
   seen: Map<string, number>,
+  base: ToolContext,
 ): Promise<string> {
   const tool = tools.get(call.name);
   if (!tool) throw new Error(`Unknown tool: ${call.name}`);
@@ -139,12 +149,16 @@ async function dispatch(
     if (err) throw new Error(`Invalid input: ${err}`);
   }
 
-  return stringify(await runTool(tool, input, opts));
+  return stringify(await runTool(tool, input, opts, base));
 }
 
 export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunResult> {
   const { adapter, signal, maxTurns = 20 } = opts;
-  const tools = new Map((opts.tools ?? []).map((t) => [t.name, t]));
+  const tools = new Map<string, Tool>();
+  for (const t of opts.tools ?? []) {
+    if (tools.has(t.name)) throw new Error(`Duplicate tool name: ${t.name}`);
+    tools.set(t.name, t);
+  }
   const specs = [...tools.values()].map((t) => ({
     name: t.name,
     description: t.description,
@@ -153,6 +167,16 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
   const messages: Message[] =
     typeof opts.prompt === "string" ? [{ role: "user", content: opts.prompt }] : [...opts.prompt];
   const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+  const budget = opts.budget ?? (opts.maxModelCalls !== undefined ? { used: 0, max: opts.maxModelCalls } : undefined);
+  const base: ToolContext = {
+    depth: opts.depth ?? 0,
+    budget,
+    addUsage: (u) => {
+      usage.inputTokens += u.inputTokens;
+      usage.outputTokens += u.outputTokens;
+    },
+  };
+  const concurrency = Math.max(1, Math.floor(opts.toolConcurrency ?? 1));
   let finalText = "";
   let stopReason: StopReason = "max_turns";
   const seen = new Map<string, number>();
@@ -164,6 +188,12 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
       stopReason = "aborted";
       break;
     }
+
+    if (budget && budget.used >= budget.max) {
+      stopReason = "budget_exceeded";
+      break;
+    }
+    if (budget) budget.used++;
 
     let res;
     try {
@@ -217,10 +247,27 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     }
 
     const results: ToolResultBlock[] = [];
-    for (const call of calls) {
-      const result = await execute(call, tools, opts, seen);
-      results.push(result);
-      yield { type: "tool_result", result };
+    if (concurrency === 1) {
+      for (const call of calls) {
+        const result = await execute(call, tools, opts, seen, base);
+        results.push(result);
+        yield { type: "tool_result", result };
+      }
+    } else {
+      // Results are reported in call order once the batch finishes.
+      let next = 0;
+      const out: ToolResultBlock[] = new Array(calls.length);
+      const worker = async () => {
+        while (next < calls.length) {
+          const i = next++;
+          out[i] = await execute(calls[i]!, tools, opts, seen, base);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(concurrency, calls.length) }, worker));
+      for (const result of out) {
+        results.push(result);
+        yield { type: "tool_result", result };
+      }
     }
     messages.push({ role: "user", content: results });
   }

@@ -8,10 +8,13 @@ export interface FsToolsOptions {
   root: string;
   /** Adds write_file. Off by default. */
   allowWrite?: boolean;
+  /** read_file refuses files larger than this. Default 1,000,000 bytes. */
+  maxFileBytes?: number;
 }
 
 export function createFsTools(opts: FsToolsOptions): Tool[] {
   const root = realpathSync(path.resolve(opts.root));
+  const maxFileBytes = opts.maxFileBytes ?? 1_000_000;
 
   // Resolves symlinks on the deepest existing ancestor so a link cannot point outside root.
   const resolve = (p: string): string => {
@@ -38,7 +41,12 @@ export function createFsTools(opts: FsToolsOptions): Tool[] {
       name: "read_file",
       description: "Read a UTF-8 text file relative to the project root.",
       schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-      run: ({ path: p }) => fs.readFile(resolve(p), "utf8"),
+      run: async ({ path: p }) => {
+        const file = resolve(p);
+        const { size } = await fs.stat(file);
+        if (size > maxFileBytes) throw new Error(`File too large: ${size} bytes (limit ${maxFileBytes})`);
+        return fs.readFile(file, "utf8");
+      },
     }),
     defineTool<{ path?: string }>({
       name: "list_dir",
