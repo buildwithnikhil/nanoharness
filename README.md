@@ -65,7 +65,17 @@ const { finalText } = await pipeline([researcher, writer], "Node 24");
 const results = await parallel([researcher, researcher], ["Node 22", "Node 24"], { concurrency: 2 });
 ```
 
-A sub-agent that does not finish (turn limit, rejected by `evaluate`, aborted) is reported to its caller as a tool error instead of a half answer. Each agent can have its own model adapter, tools, guardrails and `maxTurns`, so a cheap model can do the research while a stronger one writes.
+A sub-agent that does not finish (turn limit, rejected by `evaluate`, aborted, out of budget) is reported to its caller as a tool error instead of a half answer. Each agent can have its own model adapter, tools, guardrails and `maxTurns`, so a cheap model can do the research while a stronger one writes.
+
+**Keeping agent trees safe and cheap.** Agents that call agents can multiply cost, so `defineAgent` has these on by default:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `maxDepth` | `4` | Agents may nest this deep. A call beyond it fails with a tool error. |
+| `maxModelCalls` | `200` | One budget shared by the whole tree. When it is spent, every agent stops with `budget_exceeded`. Use `Infinity` to disable. |
+| `toolConcurrency` | `4` | Sub-agents (or tools) requested in the same turn run at the same time. Use `1` to run them in order. |
+
+Token usage of every sub-agent is added to the parent's `result.usage`, so it reports the real total. Names must be valid tool names (`a-z`, `A-Z`, `0-9`, `_`, `-`, up to 64), and two tools with the same name are rejected.
 
 **Planning.** `createPlanTool()` gives an agent an `update_plan` tool for keeping a step list. Read it back with `plan.get()`, and pass a `store` to persist it across runs.
 
@@ -113,6 +123,8 @@ await chat.run({ adapter, prompt: "I am Ada" });
 await chat.run({ adapter, prompt: "Who am I?" }); // remembers, even after a restart
 ```
 
+Runs on the same session id are queued in order as long as they share one `store` object. This does not protect against several processes writing the same id.
+
 A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `fileStore` and `memoryStore` are the only implementations shipped.
 
 ## API
@@ -137,7 +149,7 @@ for await (const ev of stream({ adapter, prompt, tools })) {
 | `signal` | An `AbortSignal`. Stops with `stopReason: "aborted"`. |
 | `onToolCall` | `(call) => "allow" \| "deny" \| { deny: reason }`, called before each tool runs. |
 
-`stopReason` is one of `end_turn`, `max_turns`, `max_tokens` or `aborted`.
+`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`.
 
 Errors from tools, from invalid model arguments, from unknown tool names and from `onToolCall` denials are returned to the model as `tool_result` blocks with `is_error: true`. Only adapter failures throw.
 
@@ -156,6 +168,8 @@ The harness adds no hidden prompt logic, so the model does what your system prom
 | `maxRepeatedCalls` | Blocks a tool call once the identical call has been made this many times. Stops loops. |
 | `evaluate` | Checks the final answer. Return `true` to accept, or `false` / `{ feedback }` to reject it and make the model retry. |
 | `maxEvalRetries` | Retries allowed after a rejected answer. Default `2`. After that, `stopReason` is `"eval_failed"`. |
+| `maxModelCalls` | Most model calls allowed in total, counting sub-agents. Stops with `"budget_exceeded"`. No limit for plain `run()`. |
+| `toolConcurrency` | Run this many tool calls from one turn at once. Default `1` for `run()`, `4` for `defineAgent`. |
 
 ```ts
 import { run, allowTools, markUntrusted } from "nanoharness";
@@ -206,7 +220,7 @@ const tools = createFsTools({ root: "./workspace" }); // read_file, list_dir
 // createFsTools({ root, allowWrite: true }) also adds write_file
 ```
 
-Paths are resolved inside `root`, and symlinks pointing outside it are rejected.
+Paths are resolved inside `root`, and symlinks pointing outside it are rejected. `read_file` refuses files over `maxFileBytes` (default 1,000,000).
 
 ### Writing an adapter
 
@@ -218,6 +232,8 @@ const myAdapter: Adapter = {
   },
 };
 ```
+
+The built-in Anthropic adapter retries rate limits and server errors (429, 5xx) with backoff, honouring `retry-after`; set `maxRetries` (default `2`). Custom adapters decide their own retry policy.
 
 Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it.
 

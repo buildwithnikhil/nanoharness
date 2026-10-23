@@ -25,6 +25,8 @@ export function memoryStore(): Store {
   };
 }
 
+let tmpCounter = 0;
+
 /** One JSON file per key under `dir`. Writes are atomic (temp file then rename). */
 export function fileStore(dir: string): Store {
   const file = (key: string) => path.join(dir, `${encodeURIComponent(key)}.json`);
@@ -40,7 +42,7 @@ export function fileStore(dir: string): Store {
     async set(key, value) {
       await fs.mkdir(dir, { recursive: true });
       const target = file(key);
-      const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+      const tmp = `${target}.${process.pid}.${tmpCounter++}.${Math.random().toString(36).slice(2)}.tmp`;
       await fs.writeFile(tmp, JSON.stringify(value));
       await fs.rename(tmp, target);
     },
@@ -73,17 +75,40 @@ function appendUser(history: Message[], text: string): Message[] {
   return [...history, { role: "user", content: text }];
 }
 
-/** A conversation that persists in `store` under `id`, so it survives across `run` calls and restarts. */
+const locks = new WeakMap<Store, Map<string, Promise<unknown>>>();
+
+// Runs fn after earlier work on the same (store, key) has settled, so read-modify-write cycles don't interleave.
+function withLock<T>(store: Store, key: string, fn: () => Promise<T>): Promise<T> {
+  let byKey = locks.get(store);
+  if (!byKey) locks.set(store, (byKey = new Map()));
+  const prev = byKey.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const tail = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  byKey.set(key, tail);
+  void tail.then(() => {
+    if (byKey.get(key) === tail) byKey.delete(key);
+  });
+  return next;
+}
+
+/**
+ * A conversation that persists in `store` under `id`, so it survives across `run` calls and restarts.
+ * Concurrent runs on the same id are queued, in order, as long as they share one `store` object.
+ */
 export function session(store: Store, id: string) {
   const key = `session:${id}`;
   return {
     messages: async (): Promise<Message[]> => (await store.get<Message[]>(key)) ?? [],
     clear: () => store.delete(key),
-    async run(opts: Omit<RunOptions, "prompt"> & { prompt: string }): Promise<RunResult> {
-      const history = (await store.get<Message[]>(key)) ?? [];
-      const result = await run({ ...opts, prompt: appendUser(history, opts.prompt) });
-      await store.set(key, result.messages);
-      return result;
-    },
+    run: (opts: Omit<RunOptions, "prompt"> & { prompt: string }): Promise<RunResult> =>
+      withLock(store, key, async () => {
+        const history = (await store.get<Message[]>(key)) ?? [];
+        const result = await run({ ...opts, prompt: appendUser(history, opts.prompt) });
+        await store.set(key, result.messages);
+        return result;
+      }),
   };
 }
