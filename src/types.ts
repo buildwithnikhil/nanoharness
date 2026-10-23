@@ -64,3 +64,11 @@ export interface AdapterResponse {
 export interface Adapter {
   complete(req: AdapterRequest): Promise<AdapterResponse>;
 }
+
+/** Minimal key-value persistence used by sessions, plans and graph checkpoints. */
+export interface Store {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  set(key: string, value: unknown): Promise<void>;
+  delete(key: string): Promise<void>;
+  keys(prefix?: string): Promise<string[]>;
+}
