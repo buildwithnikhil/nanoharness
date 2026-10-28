@@ -9,8 +9,12 @@ export interface ZodToolOptions<S extends z.ZodType> {
   run: (input: z.output<S>, ctx: ToolContext) => unknown | Promise<unknown>;
 }
 
-function jsonSchema(schema: z.ZodType): JSONSchema {
-  const { $schema: _omit, ...rest } = z.toJSONSchema(schema) as JSONSchema;
+// The model supplies input, so the schema it sees describes the input side (a field with a default is optional).
+function jsonSchema(schema: z.ZodType, name: string): JSONSchema {
+  const { $schema: _omit, ...rest } = z.toJSONSchema(schema, { io: "input" }) as JSONSchema;
+  if (rest.type !== "object") {
+    throw new Error(`defineZodTool "${name}": the schema must be a z.object(...), because tool input has to be a JSON object`);
+  }
   return rest;
 }
 
@@ -19,7 +23,7 @@ export function defineZodTool<S extends z.ZodType>(opts: ZodToolOptions<S>): Too
   return {
     name: opts.name,
     description: opts.description,
-    schema: jsonSchema(opts.schema),
+    schema: jsonSchema(opts.schema, opts.name),
     parse: (input) => {
       const r = opts.schema.safeParse(input);
       return r.success ? { ok: true, value: r.data } : { ok: false, error: r.error.message };

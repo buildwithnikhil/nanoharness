@@ -6,14 +6,21 @@ import type { Message, Store, Usage } from "./types.js";
 
 const NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 
-function anySignal(signals: AbortSignal[]): AbortSignal {
-  if (typeof AbortSignal.any === "function") return AbortSignal.any(signals);
+// Aborts when any of the signals does. `dispose` removes the listeners again (only needed on Node before 20.3).
+function anySignal(signals: AbortSignal[]): { signal: AbortSignal; dispose: () => void } {
+  if (typeof AbortSignal.any === "function") return { signal: AbortSignal.any(signals), dispose: () => {} };
   const ctl = new AbortController();
+  const cleanups: Array<() => void> = [];
   for (const s of signals) {
-    if (s.aborted) ctl.abort();
-    else s.addEventListener("abort", () => ctl.abort(), { once: true });
+    if (s.aborted) {
+      ctl.abort();
+      break;
+    }
+    const onAbort = () => ctl.abort();
+    s.addEventListener("abort", onAbort, { once: true });
+    cleanups.push(() => s.removeEventListener("abort", onAbort));
   }
-  return ctl.signal;
+  return { signal: ctl.signal, dispose: () => cleanups.forEach((c) => c()) };
 }
 
 export interface AgentConfig extends Omit<RunOptions, "prompt"> {
@@ -21,7 +28,8 @@ export interface AgentConfig extends Omit<RunOptions, "prompt"> {
   name: string;
   /** Most model calls in total across this agent and all its sub-agents. Default 200; set Infinity to disable. */
   maxModelCalls?: number;
-  /** Tool calls from one turn run up to this many at once (sub-agents in parallel). Default 4; set 1 for in-order. */
+  /** Tool calls from one turn run up to this many at once, so sub-agents run in parallel. Default 4; set 1 for in-order. */
+  toolConcurrency?: number;
   /** How deeply agents may call agents. Calls beyond this fail with a tool error. Default 4. */
   maxDepth?: number;
   /** Called for every event of this agent's loop, tagged with its name. */
@@ -43,13 +51,22 @@ export function defineAgent(config: AgentConfig): Agent {
     const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
     const opts: RunOptions = { toolConcurrency: 4, maxModelCalls: 200, ...base, ...defined, prompt };
     // Keep the agent's own signal as well as the caller's.
-    if (base.signal && defined.signal) opts.signal = anySignal([base.signal, defined.signal as AbortSignal]);
-    if (!onEvent) return run(opts);
-    const it = stream(opts);
-    for (;;) {
-      const next = await it.next();
-      if (next.done) return next.value;
-      onEvent(name, next.value);
+    let dispose = () => {};
+    if (base.signal && defined.signal) {
+      const merged = anySignal([base.signal, defined.signal as AbortSignal]);
+      opts.signal = merged.signal;
+      dispose = merged.dispose;
+    }
+    try {
+      if (!onEvent) return await run(opts);
+      const it = stream(opts);
+      for (;;) {
+        const next = await it.next();
+        if (next.done) return next.value;
+        onEvent(name, next.value);
+      }
+    } finally {
+      dispose();
     }
   };
 
@@ -68,8 +85,7 @@ export function defineAgent(config: AgentConfig): Agent {
         run: async ({ task }, ctx) => {
           const depth = ctx.depth ?? 0;
           if (depth >= maxDepth) throw new Error(`${name}: maximum agent depth (${maxDepth}) exceeded`);
-          const r = await exec(task, { signal: ctx.signal, depth: depth + 1, budget: ctx.budget });
-          ctx.addUsage?.(r.usage);
+          const r = await exec(task, { signal: ctx.signal, depth: depth + 1, budget: ctx.budget, onUsage: ctx.addUsage });
           if (r.stopReason !== "end_turn") throw new Error(`${name} stopped early (${r.stopReason})`);
           return r.finalText;
         },

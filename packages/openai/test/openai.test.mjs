@@ -3,6 +3,18 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { run, defineTool } from "nanoharness";
 import { openai } from "../dist/index.js";
+import http from "node:http";
+
+// Two local servers: A answers with a redirect to B. B records everything it receives.
+async function redirectPair(status) {
+  const seen = [];
+  const b = http.createServer((req, res) => { let body = ""; req.on("data", (d) => (body += d)); req.on("end", () => { seen.push({ method: req.method, url: req.url, headers: req.headers, body }); res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); }); });
+  await new Promise((r) => b.listen(0, "127.0.0.1", r));
+  const a = http.createServer((req, res) => { req.resume(); res.writeHead(status, { location: `http://localhost:${b.address().port}/steal` }); res.end(); });
+  await new Promise((r) => a.listen(0, "127.0.0.1", r));
+  return { seen, base: `http://127.0.0.1:${a.address().port}`, close: () => { a.close(); b.close(); a.closeAllConnections?.(); b.closeAllConnections?.(); } };
+}
+
 
 const reply = (message, finish = "stop", usage = { prompt_tokens: 3, completion_tokens: 4 }) =>
   new Response(JSON.stringify({ choices: [{ message, finish_reason: finish }], usage }));
@@ -145,4 +157,32 @@ test("an empty choices array is reported clearly", async () => {
 
 test("CJS build loads", () => {
   assert.equal(typeof createRequire(import.meta.url)("../dist/index.cjs").openai, "function");
+});
+
+test("a redirect is never followed, so neither the key nor the conversation reaches another host", async () => {
+  for (const status of [301, 302, 307, 308]) {
+    const { seen, base, close } = await redirectPair(status);
+    try {
+      const adapter = openai({ model: "m", apiKey: "SECRETKEY", baseUrl: base });
+      await assert.rejects(run({ adapter, prompt: "private conversation" }), /redirect|fetch failed/i, `status ${status}`);
+      assert.equal(seen.length, 0, `status ${status}: the second server received a request`);
+    } finally { close(); }
+  }
+});
+
+test("retry-after understands an HTTP date, a bad 2xx body is reported, and error bodies are capped", async () => {
+  let n = 0;
+  const a = openai({ model: "m", maxRetries: 1, fetch: async () => (n++ === 0 ? new Response("x", { status: 429, headers: { "retry-after": "Wed, 21 Oct 2015 07:28:00 GMT" } }) : reply({ content: "ok" })) });
+  const t0 = Date.now();
+  assert.equal((await run({ adapter: a, prompt: "x" })).finalText, "ok");
+  assert.ok(Date.now() - t0 < 250, "a date in the past means retry now, not the 500ms default backoff");
+  await assert.rejects(run({ adapter: openai({ model: "m", fetch: async () => new Response("<html>") }), prompt: "x" }), /invalid JSON/);
+  await assert.rejects(run({ adapter: openai({ model: "m", maxRetries: 0, fetch: async () => new Response("E".repeat(100_000), { status: 400 }) }), prompt: "x" }), (e) => e.message.length < 2500 && /truncated/.test(e.message));
+});
+
+test("an assistant message with no text and no tool calls is left out of the request", async () => {
+  let sent;
+  const a = openai({ model: "m", fetch: async (_, init) => ((sent = JSON.parse(init.body)), reply({ content: "ok" })) });
+  await a.complete({ tools: [], messages: [{ role: "user", content: "a" }, { role: "assistant", content: [] }, { role: "user", content: "b" }] });
+  assert.deepEqual(sent.messages.map((m) => m.role), ["user", "user"]);
 });

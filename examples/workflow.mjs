@@ -23,5 +23,5 @@ const graph = createGraph({
   },
 });
 
-const { state, status } = await graph.run({ topic: "Describe an owl" }, { fresh: true });
+const { state, status } = await graph.run({ topic: "Describe an owl" });
 console.log(status, "|", state.draft);

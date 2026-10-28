@@ -14,10 +14,10 @@ git clone https://github.com/buildwithnikhil/nanoharness
 cd nanoharness
 npm install
 npm run test:all   # builds and tests the core and all companion packages
-npm run typecheck
+npm run typecheck:all   # builds the core, then typechecks every package
 ```
 
-Building needs Node 22.18 or later (the `tsup` bundler requires it). The packages themselves run on Node 18 or later, and CI tests them on 18, 20, 22 and 24.
+Building needs Node 22.18 or later, or 24.11 or later (the `tsup` bundler requires `^22.18 || ^24.11 || >=26`). The packages themselves run on Node 18 or later, and CI tests them on 18, 20, 22 and 24.
 
 ## Layout
 

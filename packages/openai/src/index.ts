@@ -28,6 +28,24 @@ const STOP: Record<string, AdapterStopReason> = {
   length: "max_tokens",
 };
 
+/** How long to wait before a retry: the server's `retry-after` (seconds or an HTTP date) if it sent one, else exponential backoff. */
+function retryDelayMs(header: string | null, attempt: number): number {
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const at = Date.parse(header);
+    if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+  }
+  return 500 * 2 ** attempt;
+}
+
+const ERROR_BODY_LIMIT = 1000;
+
+async function errorBody(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  return text.length > ERROR_BODY_LIMIT ? `${text.slice(0, ERROR_BODY_LIMIT)}... [truncated ${text.length - ERROR_BODY_LIMIT} characters]` : text;
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
@@ -79,6 +97,7 @@ function toOpenAIMessages(system: string | undefined, messages: Message[]): Open
       const toolCalls = blocks
         .filter((b): b is ToolUseBlock => b.type === "tool_use")
         .map((b) => ({ id: b.id, type: "function" as const, function: { name: b.name, arguments: JSON.stringify(b.input) } }));
+      if (!text && toolCalls.length === 0) continue; // an empty assistant message is invalid for the API, so leave it out
       out.push({ role: "assistant", content: text || null, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) });
     } else {
       // Tool results become their own "tool" messages, and they must directly follow the assistant's tool calls.
@@ -116,21 +135,26 @@ export function openai(opts: OpenAIOptions): Adapter {
         res = await doFetch(url, {
           method: "POST",
           signal: req.signal,
+          // Never follow a redirect: the request carries your API key and the whole conversation.
+          redirect: "error",
           headers: { "content-type": "application/json", ...(opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}) },
           body,
         });
         if (res.ok || !RETRYABLE.has(res.status) || attempt >= maxRetries) break;
         await res.body?.cancel().catch(() => {}); // free the connection before waiting
-        const retryAfter = Number(res.headers.get("retry-after"));
-        const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
-        await sleep(Math.min(wait, 30_000), req.signal);
+        await sleep(Math.min(retryDelayMs(res.headers.get("retry-after"), attempt), 30_000), req.signal);
       }
-      if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await res.text()}`);
+      if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await errorBody(res)}`);
 
-      const data = (await res.json()) as {
+      let data: {
         choices?: { message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }; finish_reason?: string }[];
         usage?: { prompt_tokens: number; completion_tokens: number };
       };
+      try {
+        data = (await res.json()) as typeof data;
+      } catch {
+        throw new Error("OpenAI API returned invalid JSON");
+      }
       const choice = data.choices?.[0];
       if (!choice?.message) throw new Error("OpenAI API returned no choices");
 

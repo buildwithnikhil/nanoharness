@@ -33,7 +33,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test test/fs.test.mjs"
+    "test:run": "node --test test/fs.test.mjs test/hardening.test.mjs"
   },
   "keywords": [
     "nanoharness",

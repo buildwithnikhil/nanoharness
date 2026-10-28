@@ -73,4 +73,9 @@ export interface Store {
   set(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<void>;
   keys(prefix?: string): Promise<string[]>;
+  /**
+   * Optional. Runs `fn` while holding an exclusive lock on `key`. A store shared by several processes
+   * should provide it. Without it, sessions and graphs queue runs within one process only.
+   */
+  lock?<T>(key: string, fn: () => Promise<T>): Promise<T>;
 }

@@ -73,7 +73,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/review.test.mjs test/cjs.test.cjs",
+    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/review.test.mjs test/hardening.test.mjs test/cjs.test.cjs",
     "test:all": "npm run build:all && npm run test:run:all",
     "test:run:all": "npm run test:run && npm run test:run --workspaces",
     "build:all": "npm run build && npm run build --workspaces",
