@@ -3,7 +3,6 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: {
     index: "src/index.ts",
-    "tools-fs": "src/tools-fs.ts",
     zod: "src/zod.ts",
     agents: "src/agents.ts",
     graph: "src/graph.ts",

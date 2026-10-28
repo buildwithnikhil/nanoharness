@@ -1,8 +1,10 @@
 name: Publish
 
+# One tag per package: v1.2.3 (core), anthropic-v1.2.3, openai-v1.2.3, fs-v1.2.3.
+# Each package must have this repository and workflow set as a trusted publisher on npm.
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "anthropic-v*", "openai-v*", "fs-v*"]
 
 permissions:
   contents: read
@@ -16,9 +18,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Pick the package from the tag
+        id: pkg
+        run: |
+          case "$GITHUB_REF_NAME" in
+            anthropic-v*) dir=packages/anthropic; ver="${GITHUB_REF_NAME#anthropic-v}" ;;
+            openai-v*)    dir=packages/openai;    ver="${GITHUB_REF_NAME#openai-v}" ;;
+            fs-v*)        dir=packages/fs;        ver="${GITHUB_REF_NAME#fs-v}" ;;
+            v*)           dir=.;                  ver="${GITHUB_REF_NAME#v}" ;;
+          esac
+          actual=$(node -p "require('./$dir/package.json').version")
+          test "$ver" = "$actual" || { echo "Tag version $ver does not match $dir/package.json version $actual"; exit 1; }
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
       - run: npm ci
-      - run: npm run typecheck
-      - run: npm test
-      - name: Tag must match package.json version
-        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
-      - run: npm publish --provenance --access public
+      - run: npm run typecheck:all
+      - run: npm run test:all
+      - name: Publish with provenance
+        working-directory: ${{ steps.pkg.outputs.dir }}
+        run: npm publish --provenance --access public

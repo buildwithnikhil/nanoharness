@@ -1,7 +1,7 @@
 {
   "name": "nanoharness",
-  "version": "1.3.0",
-  "description": "Zero-dependency, provider-agnostic agent harness for small apps. Bring your own tools; ships an Anthropic adapter.",
+  "version": "2.0.0",
+  "description": "Zero-dependency, provider-agnostic agent harness for small apps: tool loop, guardrails, multi-agent orchestration, workflow graphs and sessions. No network or filesystem code in the core.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -15,16 +15,6 @@
       "require": {
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
-      }
-    },
-    "./tools-fs": {
-      "import": {
-        "types": "./dist/tools-fs.d.ts",
-        "default": "./dist/tools-fs.js"
-      },
-      "require": {
-        "types": "./dist/tools-fs.d.cts",
-        "default": "./dist/tools-fs.cjs"
       }
     },
     "./zod": {
@@ -83,15 +73,17 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/cjs.test.cjs"
+    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/review.test.mjs test/cjs.test.cjs",
+    "test:all": "npm run build:all && npm run test:run:all",
+    "test:run:all": "npm run test:run && npm run test:run --workspaces",
+    "build:all": "npm run build && npm run build --workspaces",
+    "typecheck:all": "npm run typecheck && npm run typecheck --workspaces"
   },
   "keywords": [
     "agent",
     "llm",
     "harness",
     "tools",
-    "anthropic",
-    "claude",
     "tool-use",
     "zero-dependency",
     "multi-agent",
@@ -128,5 +120,8 @@
   "homepage": "https://github.com/buildwithnikhil/nanoharness#readme",
   "bugs": {
     "url": "https://github.com/buildwithnikhil/nanoharness/issues"
-  }
+  },
+  "workspaces": [
+    "packages/*"
+  ]
 }

@@ -63,7 +63,7 @@ export type AgentEvent =
 function stringify(v: unknown): string {
   if (typeof v === "string") return v;
   if (v === undefined) return "";
-  return JSON.stringify(v);
+  return JSON.stringify(v) ?? "";
 }
 
 async function runTool(tool: Tool, input: unknown, opts: RunOptions, base: ToolContext): Promise<unknown> {
@@ -208,6 +208,13 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
 
     usage.inputTokens += res.usage?.inputTokens ?? 0;
     usage.outputTokens += res.usage?.outputTokens ?? 0;
+    if (res.stopReason === "max_tokens" && res.content.some((b) => b.type === "tool_use")) {
+      // A tool call cut off by the token limit has incomplete input, so it must not run.
+      // The turn is dropped so the conversation stays valid and can be retried with a larger limit.
+      finalText = res.content.map((b) => (b.type === "text" ? b.text : "")).join("");
+      stopReason = "max_tokens";
+      break;
+    }
     messages.push({ role: "assistant", content: res.content as ContentBlock[] });
 
     const calls: ToolUseBlock[] = [];

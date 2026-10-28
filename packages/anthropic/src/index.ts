@@ -1,9 +1,11 @@
-import type { Adapter, AdapterResponse, AdapterStopReason, TextBlock, ToolUseBlock } from "./types.js";
+import type { Adapter, AdapterResponse, AdapterStopReason, TextBlock, ToolUseBlock } from "nanoharness";
 
 export interface AnthropicOptions {
   apiKey: string;
   model?: string;
   maxTokens?: number;
+  temperature?: number;
+  /** Where requests, and so the API key, are sent. Must be https (or http on localhost). Default https://api.anthropic.com. */
   baseUrl?: string;
   fetch?: typeof fetch;
   /** Retries for rate limits and server errors (429, 5xx), with backoff. Default 2. */
@@ -34,15 +36,32 @@ const STOP: Record<string, AdapterStopReason> = {
   max_tokens: "max_tokens",
 };
 
+function messagesUrl(baseUrl: string): string {
+  let u: URL;
+  try {
+    u = new URL(baseUrl);
+  } catch {
+    throw new Error(`anthropic(): invalid baseUrl "${baseUrl}"`);
+  }
+  const local = u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "[::1]";
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && local)) {
+    throw new Error("anthropic(): baseUrl must use https (http is only allowed for localhost), so the API key is never sent in clear text");
+  }
+  if (u.username || u.password) throw new Error("anthropic(): baseUrl must not contain credentials");
+  return `${u.origin}${u.pathname.replace(/\/+$/, "")}/v1/messages`;
+}
+
 export function anthropic(opts: AnthropicOptions): Adapter {
+  if (!opts.apiKey) throw new Error("anthropic(): apiKey is required");
   const doFetch = opts.fetch ?? fetch;
-  const url = `${opts.baseUrl ?? "https://api.anthropic.com"}/v1/messages`;
+  const url = messagesUrl(opts.baseUrl ?? "https://api.anthropic.com");
 
   return {
     async complete(req): Promise<AdapterResponse> {
       const body = JSON.stringify({
         model: opts.model ?? "claude-sonnet-5-5",
         max_tokens: opts.maxTokens ?? 4096,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         system: req.system,
         messages: req.messages,
         ...(req.tools.length ? { tools: req.tools } : {}),

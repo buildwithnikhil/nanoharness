@@ -1,8 +1,8 @@
 import { run, stream } from "./agent.js";
 import type { AgentEvent, RunOptions, RunResult } from "./agent.js";
 import { defineTool } from "./tool.js";
-import type { Tool } from "./tool.js";
-import type { Message, Store } from "./types.js";
+import type { Budget, Tool } from "./tool.js";
+import type { Message, Store, Usage } from "./types.js";
 
 const NAME = /^[a-zA-Z0-9_-]{1,64}$/;
 
@@ -77,29 +77,39 @@ export function defineAgent(config: AgentConfig): Agent {
   };
 }
 
+// One model-call budget for every agent in a pipeline or parallel group (otherwise each agent has its own).
+function sharedBudget(max: number | undefined): Budget | undefined {
+  return max === undefined ? undefined : { used: 0, max };
+}
+
 /** Runs agents in order; each one receives the previous one's final answer. Throws if a step does not finish. */
 export async function pipeline(
   agents: Agent[],
   input: string,
-  opts: { signal?: AbortSignal } = {},
-): Promise<{ finalText: string; results: RunResult[] }> {
+  opts: { signal?: AbortSignal; maxModelCalls?: number } = {},
+): Promise<{ finalText: string; results: RunResult[]; usage: Usage }> {
   const results: RunResult[] = [];
+  const budget = sharedBudget(opts.maxModelCalls);
+  const usage: Usage = { inputTokens: 0, outputTokens: 0 };
   let text = input;
   for (const agent of agents) {
-    const r = await agent.run(text, { signal: opts.signal });
+    const r = await agent.run(text, { signal: opts.signal, budget });
+    usage.inputTokens += r.usage.inputTokens;
+    usage.outputTokens += r.usage.outputTokens;
     if (r.stopReason !== "end_turn") throw new Error(`${agent.name} stopped early (${r.stopReason})`);
     results.push(r);
     text = r.finalText;
   }
-  return { finalText: text, results };
+  return { finalText: text, results, usage };
 }
 
 /** Runs agents concurrently (optionally limited) on one shared input or one input each. Never rejects as a whole. */
 export async function parallel(
   agents: Agent[],
   input: string | string[],
-  opts: { concurrency?: number; signal?: AbortSignal } = {},
+  opts: { concurrency?: number; signal?: AbortSignal; maxModelCalls?: number } = {},
 ): Promise<PromiseSettledResult<RunResult>[]> {
+  const budget = sharedBudget(opts.maxModelCalls);
   const out: PromiseSettledResult<RunResult>[] = new Array(agents.length);
   let next = 0;
   const worker = async () => {
@@ -107,7 +117,7 @@ export async function parallel(
       const i = next++;
       try {
         const prompt = Array.isArray(input) ? (input[i] ?? "") : input;
-        out[i] = { status: "fulfilled", value: await agents[i]!.run(prompt, { signal: opts.signal }) };
+        out[i] = { status: "fulfilled", value: await agents[i]!.run(prompt, { signal: opts.signal, budget }) };
       } catch (reason) {
         out[i] = { status: "rejected", reason };
       }

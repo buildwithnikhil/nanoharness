@@ -12,8 +12,9 @@ function matchesType(v: unknown, t: string): boolean {
 }
 
 /**
- * Minimal JSON Schema check: type, required, properties, enum, items.
- * Unknown keywords are ignored. Returns an error message or null.
+ * Minimal JSON Schema check: type, enum, required, properties, additionalProperties: false, items,
+ * minimum/maximum, minLength/maxLength, pattern and minItems/maxItems.
+ * Other keywords are sent to the model but not enforced. Returns an error message or null.
  */
 export function validate(value: unknown, schema: JSONSchema, path = "input"): string | null {
   if (schema.type !== undefined) {
@@ -25,8 +26,21 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
   if (schema.enum && !schema.enum.includes(value)) {
     return `${path}: must be one of ${schema.enum.map((e) => JSON.stringify(e)).join(", ")}`;
   }
+  if (typeof value === "number") {
+    if (typeof schema.minimum === "number" && value < schema.minimum) return `${path}: must be >= ${schema.minimum}`;
+    if (typeof schema.maximum === "number" && value > schema.maximum) return `${path}: must be <= ${schema.maximum}`;
+  }
+  if (typeof value === "string") {
+    if (typeof schema.minLength === "number" && value.length < schema.minLength) return `${path}: must be at least ${schema.minLength} characters`;
+    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return `${path}: must be at most ${schema.maxLength} characters`;
+    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) return `${path}: must match ${schema.pattern}`;
+  }
   if (typeOf(value) === "object") {
     const obj = value as Record<string, unknown>;
+    if (schema.additionalProperties === false) {
+      const extra = Object.keys(obj).find((k) => !(k in (schema.properties ?? {})));
+      if (extra !== undefined) return `${path}.${extra}: not allowed`;
+    }
     for (const key of schema.required ?? []) {
       if (!(key in obj)) return `${path}.${key}: required`;
     }
@@ -36,6 +50,10 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
         if (err) return err;
       }
     }
+  }
+  if (Array.isArray(value)) {
+    if (typeof schema.minItems === "number" && value.length < schema.minItems) return `${path}: needs at least ${schema.minItems} items`;
+    if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return `${path}: allows at most ${schema.maxItems} items`;
   }
   if (Array.isArray(value) && schema.items) {
     for (let i = 0; i < value.length; i++) {

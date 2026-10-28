@@ -44,6 +44,7 @@ interface Checkpoint<S> {
 export function createGraph<S extends object>(opts: GraphOptions<S>) {
   const { nodes, entry, edges = {}, maxSteps = 50 } = opts;
   if (!(entry in nodes)) throw new Error(`Unknown entry node: ${entry}`);
+  if (Boolean(opts.store) !== Boolean(opts.id)) throw new Error("createGraph: `store` and `id` must be given together to enable checkpoints");
   const key = opts.store && opts.id ? `graph:${opts.id}` : undefined;
 
   return {
