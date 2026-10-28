@@ -38,6 +38,7 @@ export interface GraphOptions<S> {
   /**
    * With `id`, saves a checkpoint after every node so a crashed or stopped run can resume. State must then be
    * JSON-serialisable. Runs with the same `id` are queued, across processes too if the store has a `lock`.
+   * So a node must not call `run()` on its own graph id, which would wait for itself forever.
    */
   store?: Store;
   id?: string;

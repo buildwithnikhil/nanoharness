@@ -288,3 +288,52 @@ test("zod: the model is shown the input schema, so defaulted fields are optional
 test("zod: a schema that is not an object is rejected up front", () => {
   assert.throws(() => defineZodTool({ name: "t", description: "", schema: z.string(), run: () => "" }), /must be a z\.object/);
 });
+
+// ---- master review
+test("L4: a run aborted while onToolCall is deciding does not start the tool", async () => {
+  const ctl = new AbortController();
+  let ran = false;
+  const r = await run({
+    adapter: scripted(calls(["t"]), text("never")),
+    prompt: "x",
+    tools: [tool("t", () => { ran = true; })],
+    signal: ctl.signal,
+    onToolCall: async () => { ctl.abort(); return "allow"; },
+  });
+  assert.equal(ran, false);
+  assert.equal(r.stopReason, "aborted");
+});
+
+test("L5: very deep input or schemas are reported, never a stack overflow", () => {
+  let deep = 1;
+  for (let i = 0; i < 20_000; i++) deep = [deep];
+  assert.match(validate(deep, { uniqueItems: true }), /nested too deeply/);
+  assert.match(validate([deep, deep], { type: "array", uniqueItems: true }), /nested too deeply/);
+  assert.match(validate(deep, { const: 1 }), /must equal|nested too deeply/);
+  let schema = { type: "array" };
+  for (let i = 0; i < 5_000; i++) schema = { type: "array", items: schema };
+  let value = [];
+  for (let i = 0; i < 5_000; i++) value = [value];
+  assert.match(validate(value, schema), /nested too deeply/);
+});
+
+test("L5: maxRepeatedCalls with deeply nested input is a tool error, not a crash", async () => {
+  let deep = 1;
+  for (let i = 0; i < 20_000; i++) deep = { a: deep };
+  const last = [];
+  const replies = [calls(["t", { d: deep }]), text("ok")];
+  const adapter = { complete: async (q) => (last.push(q.messages.at(-1)), replies.shift()) }; // no cloning: the input is too deep to clone
+  const r = await run({ adapter, prompt: "x", tools: [tool("t", () => "ran")], maxRepeatedCalls: 2 });
+  assert.equal(r.stopReason, "end_turn");
+  assert.equal(last[1].content[0].is_error, true);
+  assert.match(last[1].content[0].content, /nested too deeply/);
+});
+
+test("L7: a sub-agent's own onUsage is still called, and the parent's total is unchanged", async () => {
+  const own = [];
+  const worker = defineAgent({ name: "w", onUsage: (u) => own.push(u.inputTokens), adapter: scripted(text("w", { inputTokens: 5, outputTokens: 1 })) });
+  const lead = defineAgent({ name: "lead", tools: [worker.asTool("w")], adapter: scripted({ ...calls(["w", { task: "t" }]), usage: { inputTokens: 1, outputTokens: 1 } }, text("ok", { inputTokens: 1, outputTokens: 1 })) });
+  const r = await lead.run("go");
+  assert.deepEqual(own, [5]);
+  assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 3 });
+});

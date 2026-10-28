@@ -155,3 +155,40 @@ test("tools still work end to end after the hardening", async () => {
   await write.run({ path: "d/e/f.txt", content: "deep" }, {});
   assert.equal(await read.run({ path: "d/e/f.txt" }, {}), "deep");
 });
+
+// ---- master review
+test("M1: keys with a lone surrogate round-trip and do not collide with U+FFFD", async () => {
+  const dir = await tmp("nh-surr-");
+  const s = fileStore(dir);
+  await s.set("\ud800", "lone");
+  await s.set("�", "replacement");
+  await s.set("x\udfff", "trailing");
+  assert.equal(await s.get("\ud800"), "lone");
+  assert.equal(await s.get("�"), "replacement");
+  assert.equal(await s.get("x\udfff"), "trailing");
+  assert.deepEqual((await s.keys()).sort(), ["\ud800", "x\udfff", "�"].sort());
+  await s.delete("\ud800");
+  assert.equal(await s.get("\ud800"), undefined);
+  assert.equal(await s.get("�"), "replacement");
+});
+
+test("L2: a reserved Windows device name is escaped even when followed by an extension", async () => {
+  const dir = await tmp("nh-res-");
+  const s = fileStore(dir);
+  for (const k of ["con.foo", "aux.x.y", "lpt1.txt", "console"]) await s.set(k, k);
+  for (const k of ["con.foo", "aux.x.y", "lpt1.txt", "console"]) assert.equal(await s.get(k), k);
+  for (const n of await fsp.readdir(dir)) assert.ok(!/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(n), n);
+});
+
+test("L1: a holder that lost its lock does not delete the lock of whoever took over", async () => {
+  const dir = await tmp("nh-token-");
+  const a = fileStore(dir);
+  await a.lock("k", async () => {
+    const lockName = (await fsp.readdir(dir)).find((n) => n.endsWith(".lock"));
+    // stand in for another process that took the lock over while this holder was stalled
+    await fsp.writeFile(path.join(dir, lockName), "another holder's token");
+  });
+  const left = (await fsp.readdir(dir)).filter((n) => n.endsWith(".lock"));
+  assert.equal(left.length, 1, "the other holder's lock file is still there");
+  assert.equal(await fsp.readFile(path.join(dir, left[0]), "utf8"), "another holder's token");
+});

@@ -160,7 +160,7 @@ test("a redirect is never followed, so the API key cannot reach another host", a
     const { seen, base, close } = await redirectPair(status);
     try {
       const adapter = anthropic({ apiKey: "SECRETKEY", baseUrl: base });
-      await assert.rejects(run({ adapter, prompt: "x" }), /redirect|fetch failed/i, `status ${status}`);
+      await assert.rejects(run({ adapter, prompt: "x" }), /redirect, which is never followed/, `status ${status}`);
       assert.equal(seen.length, 0, `status ${status}: the second server received a request`);
     } finally { close(); }
   }

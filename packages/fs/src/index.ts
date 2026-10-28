@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as C, lstatSync, promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
 import { defineTool } from "nanoharness";
@@ -137,7 +137,10 @@ export interface FileStoreOptions {
   lockTimeoutMs?: number;
 }
 
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+// Windows treats these as devices even with an extension ("con.json", "con.foo.json"), so the part before the first dot is checked.
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+// A lone surrogate cannot be encoded as UTF-8 without becoming U+FFFD, which would make two keys share a file.
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 const MAX_NAME = 200;
 
 // One file per key. Everything except a-z, 0-9 and - _ . ~ is percent-encoded, upper-case letters included, so two
@@ -145,6 +148,7 @@ const MAX_NAME = 200;
 // empty, very long, or that would give a reserved device name are stored under a hash instead (the real key is kept
 // inside the file), so a name is never longer than a file system allows.
 function fileName(key: string): string {
+  if (LONE_SURROGATE.test(key)) return `%h-${createHash("sha256").update(Buffer.from(key, "utf16le")).digest("hex")}.json`;
   let name = "";
   for (const ch of key) {
     if (/[a-z0-9\-_.~]/.test(ch)) name += ch;
@@ -158,7 +162,12 @@ function fileName(key: string): string {
 // What 1.x of nanoharness wrote: encodeURIComponent, with no case or reserved-name handling. It is only looked
 // up when it is a legal file name, since 1.x could not store longer keys at all.
 const legacyFileName = (key: string): string | undefined => {
-  const name = `${encodeURIComponent(key)}.json`;
+  let name: string;
+  try {
+    name = `${encodeURIComponent(key)}.json`;
+  } catch {
+    return undefined; // a key 1.x could not have stored
+  }
   return name.length <= MAX_NAME ? name : undefined;
 };
 
@@ -213,10 +222,13 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): Store {
     await fs.mkdir(dir, { recursive: true });
     const lockFile = path.join(dir, fileName(`lock:${key}`).replace(/\.json$/, ".lock"));
     const deadline = Date.now() + timeoutMs;
+    // A token identifies this holder, so a holder that stalled past lockStaleMs (and lost the lock) cannot
+    // delete the lock of whoever took over.
+    const token = `${process.pid} ${randomUUID()}`;
     for (;;) {
       try {
         const handle = await fs.open(lockFile, "wx"); // fails if it exists, atomically
-        await handle.writeFile(`${process.pid}\n`);
+        await handle.writeFile(token);
         await handle.close();
         break;
       } catch (e) {
@@ -244,7 +256,8 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): Store {
     heartbeat.unref();
     return async () => {
       clearInterval(heartbeat);
-      await fs.rm(lockFile, { force: true });
+      const current = await fs.readFile(lockFile, "utf8").catch(() => undefined);
+      if (current === token) await fs.rm(lockFile, { force: true });
     };
   };
 
