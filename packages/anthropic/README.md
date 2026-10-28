@@ -21,8 +21,10 @@ const { finalText } = await run({
 | `apiKey` | Required. |
 | `model` | Default `claude-sonnet-5-5`. |
 | `maxTokens` | Default `4096`. |
-| `maxRetries` | Retries for 408, 429 and 5xx responses, with backoff that honours `retry-after`. Default `2`. |
+| `maxRetries` | Retries for HTTP 408, 429, 500, 502, 503, 504 and 529, with backoff that honours `retry-after` (seconds or an HTTP date). Default `2`. |
 | `baseUrl` | Where requests, and so the API key, are sent. Must be `https` (`http` only for `localhost`) and must not contain credentials. Default `https://api.anthropic.com`. |
 | `fetch` | A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. |
+
+Requests never follow redirects, so a misconfigured or hostile `baseUrl` cannot forward your key to another host. If you pass your own `fetch`, make sure it does the same. Error text from the API is cut to 1,000 characters.
 
 Zero dependencies. Node 18 or later. MIT.

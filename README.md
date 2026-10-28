@@ -89,7 +89,7 @@ A sub-agent that does not finish (turn limit, rejected by `evaluate`, aborted, o
 
 Token usage of every sub-agent is added to the parent's `result.usage`, so it reports the real total. Names must be valid tool names (`a-z`, `A-Z`, `0-9`, `_`, `-`, up to 64), and two tools with the same name are rejected.
 
-**Planning.** `createPlanTool()` gives an agent an `update_plan` tool for keeping a step list. Read it back with `plan.get()`, and pass a `store` to persist it across runs.
+**Planning.** `createPlanTool()` gives an agent an `update_plan` tool for keeping a step list. Read it back with `plan.get()`. Pass a `store` to save it after every update, and call `await plan.load()` at startup to restore it, because a new plan tool starts empty.
 
 ```ts
 const plan = createPlanTool({ store });
@@ -121,7 +121,9 @@ const { state, path, status } = await graph.run({ topic: "cats" });
 
 A node returns `{ state, next }`. `state` is merged into the shared state, and `next` is a node name or `END`. If it omits `next`, `edges[node]` is used, otherwise the run ends. `status` is `done`, `max_steps` or `aborted`.
 
-Pass `store` and `id` and the graph saves a checkpoint after every node. If the process crashes, run it again with the same `id` and it resumes at the node that failed. Pass `{ fresh: true }` to `run()` to ignore the checkpoint. The checkpoint is deleted when a run finishes.
+Pass `store` and `id` and the graph saves a checkpoint after every node. If the process crashes, run it again with the same `id` and it resumes at the node that failed; `initial` is ignored when it resumes. A run that finishes (`done`) deletes its checkpoint. A run that stops on `max_steps` or `aborted` keeps it, so calling `run()` again continues where it stopped, and `{ fresh: true }` ignores the checkpoint and starts over. `maxSteps` limits the nodes one call may run, so a resumed call gets a fresh allowance.
+
+With a store, graph state is saved as JSON after every node, so it must be JSON-serialisable (a `Date` comes back as a string, and a key set to `undefined` disappears). A resumed run therefore sees the same state as an uninterrupted one. A node that returns a `next` that does not exist throws before anything is saved, and the checkpoint is saved before `onStep` is called. Runs with the same `id` are queued, not interleaved.
 
 ### Persistence: `nanoharness/store`
 
@@ -136,7 +138,7 @@ await chat.run({ adapter, prompt: "I am Ada" });
 await chat.run({ adapter, prompt: "Who am I?" }); // remembers, even after a restart
 ```
 
-Runs on the same session id are queued in order as long as they share one `store` object. This does not protect against several processes writing the same id.
+Runs and `clear()` on the same session id are queued in order. That holds across processes too when the store has a `lock`, as `fileStore` from `nanoharness-fs` does (it is a lock file with a heartbeat, for a few cooperating processes on one local disk, not for network file systems). For a store without `lock`, such as `memoryStore`, or your own, it holds only for runs that share one `store` object in one process.
 
 A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. Sessions keep the whole history, so a long-lived session grows until you `clear()` it or trim it yourself.
 
@@ -162,7 +164,9 @@ for await (const ev of stream({ adapter, prompt, tools })) {
 | `signal` | An `AbortSignal`. Stops with `stopReason: "aborted"`. |
 | `onToolCall` | `(call) => "allow" \| "deny" \| { deny: reason }`, called before each tool runs. |
 
-`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`. If the token limit cuts off a tool call halfway, the call is not run, that turn is dropped from `messages`, and `stopReason` is `max_tokens`, so you can retry with a larger limit.
+`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`. A rejected answer is never `end_turn`: if `evaluate` rejects it and no retries or turns are left, the result is `eval_failed`.
+
+Aborting stops the run promptly. Tool calls that have not started are skipped and answered with an error, so the history stays valid, and a tool that ignores its `signal` is no longer waited for. If the token limit cuts off a tool call halfway, the call is not run, that turn is dropped from `messages`, and `stopReason` is `max_tokens`, so you can retry with a larger limit.
 
 Errors from tools, from invalid model arguments, from unknown tool names and from `onToolCall` denials are returned to the model as `tool_result` blocks with `is_error: true`. Only adapter failures throw.
 
@@ -176,8 +180,8 @@ The harness adds no hidden prompt logic, so the model does what your system prom
 |---|---|
 | `onToolCall` | Approve or deny each tool call. `allowTools(["read_file"])` is a ready-made allow-list. |
 | `onToolResult` | Rewrite tool output before the model sees it (redact secrets, fence untrusted text). `markUntrusted()` wraps output in `<untrusted_tool_output>` tags. |
-| `maxToolResultChars` | Hard cap on any single tool result. |
-| `toolTimeoutMs` | Aborts a slow tool. The tool receives an aborted `signal` and the model gets an error result. |
+| `maxToolResultChars` | Hard cap on the length of any single tool result, marker included. Output is cut cleanly, never in the middle of an emoji. |
+| `toolTimeoutMs` | Stops waiting for a slow tool. The tool receives an aborted `signal` and the model gets an error result. |
 | `maxRepeatedCalls` | Blocks a tool call once the identical call has been made this many times. Stops loops. |
 | `evaluate` | Checks the final answer. Return `true` to accept, or `false` / `{ feedback }` to reject it and make the model retry. |
 | `maxEvalRetries` | Retries allowed after a rejected answer. Default `2`. After that, `stopReason` is `"eval_failed"`. |
@@ -208,7 +212,9 @@ What this does not do: no prompt-injection defence is complete. Fencing untruste
 
 ### `defineTool({ name, description, schema, run })`
 
-`schema` is plain JSON Schema. Model arguments are checked against `type`, `enum`, `required`, `properties`, `additionalProperties: false`, `items`, `minimum` / `maximum`, `minLength` / `maxLength`, `pattern` and `minItems` / `maxItems`. Other keywords are sent to the model but not enforced. A failed check goes back to the model as an error so it can correct itself.
+`schema` is plain JSON Schema. Model arguments are checked against `type`, `enum`, `const`, `required`, `properties`, `additionalProperties` (`false` or a schema), `items`, `minimum` / `maximum` / `exclusiveMinimum` / `exclusiveMaximum` / `multipleOf`, `minLength` / `maxLength` / `pattern`, `minItems` / `maxItems` / `uniqueItems`, and `allOf` / `anyOf` / `oneOf`. Other keywords (`$ref`, `format`, `if` / `then`, `patternProperties`, ...) are sent to the model but not enforced, so enforce those in the tool or with `defineZodTool`. Only own properties count, so a model-supplied `__proto__` or `toString` key cannot slip past `additionalProperties: false` or satisfy `required`. A failed check goes back to the model as an error so it can correct itself.
+
+A `pattern` is matched against strings up to 100,000 characters (longer ones are refused). Write patterns without nested quantifiers such as `(a+)+`, which can take exponential time on some input; the harness cannot make a slow pattern fast.
 
 ### Zod (optional)
 
@@ -248,7 +254,7 @@ const myAdapter: Adapter = {
 
 If a provider returns a malformed tool call, set `error` on the `tool_use` block you return. The harness will not run it and will tell the model what was wrong. If the output was cut off by the token limit, return `stopReason: "max_tokens"` so truncated calls are not run.
 
-The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), retry rate limits and server errors (429, 5xx) with backoff and refuse to send your API key over plain http to a remote host. A custom adapter decides its own retry policy.
+The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), retry rate limits and server errors with backoff, never follow a redirect (so your key and conversation cannot be forwarded to another host), and refuse to send your API key over plain http to a remote host. A custom adapter decides its own retry and redirect policy.
 
 Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it, as `nanoharness-openai` does.
 

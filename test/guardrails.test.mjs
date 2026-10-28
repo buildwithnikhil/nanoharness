@@ -69,10 +69,15 @@ test("onToolResult rewrites output, including errors", async () => {
   assert.deepEqual(infos, [["t", false], ["bad", true]]);
 });
 
-test("maxToolResultChars truncates after onToolResult", async () => {
+test("maxToolResultChars is a hard cap: truncated output, marker included, never exceeds it", async () => {
   const adapter = fake(call("1", "t"), text("ok"));
-  await run({ adapter, prompt: "x", tools: [tool("t", () => "x".repeat(100))], maxToolResultChars: 10 });
-  assert.equal(lastResult(adapter, 1).content, "xxxxxxxxxx\n[truncated 90 characters]");
+  await run({ adapter, prompt: "x", tools: [tool("t", () => "x".repeat(100))], maxToolResultChars: 60 });
+  const c = lastResult(adapter, 1).content;
+  assert.ok(c.length <= 60, `length ${c.length}`);
+  assert.match(c, /^x+\n\[truncated \d+ characters\]$/);
+  const tiny = fake(call("1", "t"), text("ok"));
+  await run({ adapter: tiny, prompt: "x", tools: [tool("t", () => "x".repeat(100))], maxToolResultChars: 10 });
+  assert.equal(lastResult(tiny, 1).content, "x".repeat(10), "too small for a marker: just cut");
 });
 
 test("toolTimeoutMs aborts a slow tool and reports an error", async () => {

@@ -2,6 +2,18 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { run } from "nanoharness";
 import { anthropic } from "../dist/index.js";
+import http from "node:http";
+
+// Two local servers: A answers with a redirect to B. B records everything it receives.
+async function redirectPair(status) {
+  const seen = [];
+  const b = http.createServer((req, res) => { let body = ""; req.on("data", (d) => (body += d)); req.on("end", () => { seen.push({ method: req.method, url: req.url, headers: req.headers, body }); res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); }); });
+  await new Promise((r) => b.listen(0, "127.0.0.1", r));
+  const a = http.createServer((req, res) => { req.resume(); res.writeHead(status, { location: `http://localhost:${b.address().port}/steal` }); res.end(); });
+  await new Promise((r) => a.listen(0, "127.0.0.1", r));
+  return { seen, base: `http://127.0.0.1:${a.address().port}`, close: () => { a.close(); b.close(); a.closeAllConnections?.(); b.closeAllConnections?.(); } };
+}
+
 
 const okBody = (text = "hi") =>
   JSON.stringify({
@@ -141,4 +153,42 @@ test("apiKey is required", () => {
 test("live call (needs ANTHROPIC_API_KEY)", { skip: !process.env.ANTHROPIC_API_KEY }, async () => {
   const r = await run({ adapter: anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), prompt: "Say hi in one word." });
   assert.ok(r.finalText.length > 0);
+});
+
+test("a redirect is never followed, so the API key cannot reach another host", async () => {
+  for (const status of [301, 302, 307, 308]) {
+    const { seen, base, close } = await redirectPair(status);
+    try {
+      const adapter = anthropic({ apiKey: "SECRETKEY", baseUrl: base });
+      await assert.rejects(run({ adapter, prompt: "x" }), /redirect|fetch failed/i, `status ${status}`);
+      assert.equal(seen.length, 0, `status ${status}: the second server received a request`);
+    } finally { close(); }
+  }
+});
+
+test("retry-after is understood in seconds and as an HTTP date", async () => {
+  const waits = [];
+  const mk = (header) => { let n = 0; return anthropic({ apiKey: "k", maxRetries: 1, fetch: async () => (n++ === 0 ? new Response("x", { status: 429, headers: { "retry-after": header } }) : new Response(okBody("ok"))) }); };
+  const t0 = Date.now();
+  await run({ adapter: mk(new Date(Date.now() + 300).toUTCString()), prompt: "x" });
+  waits.push(Date.now() - t0);
+  assert.ok(waits[0] >= 0, "a date in the past or near future is accepted");
+  const t1 = Date.now();
+  await run({ adapter: mk("Wed, 21 Oct 2015 07:28:00 GMT"), prompt: "x" });
+  assert.ok(Date.now() - t1 < 250, "a date in the past means retry now, not the 500ms default backoff");
+});
+
+test("a 2xx body that is not JSON, and huge error bodies, give clear errors", async () => {
+  const notJson = anthropic({ apiKey: "k", fetch: async () => new Response("<html>gateway</html>") });
+  await assert.rejects(run({ adapter: notJson, prompt: "x" }), /invalid JSON/);
+  const huge = anthropic({ apiKey: "k", maxRetries: 0, fetch: async () => new Response("E".repeat(100_000), { status: 400 }) });
+  await assert.rejects(run({ adapter: huge, prompt: "x" }), (e) => e.message.length < 2500 && /400/.test(e.message) && /truncated/.test(e.message));
+});
+
+test("stop reasons: refusal ends the turn, unknown ones map to other", async () => {
+  const mk = (stop) => anthropic({ apiKey: "k", fetch: async () => new Response(JSON.stringify({ content: [{ type: "text", text: "no" }], stop_reason: stop })) });
+  const go = (stop) => mk(stop).complete({ messages: [{ role: "user", content: "x" }], tools: [] });
+  assert.equal((await go("refusal")).stopReason, "end_turn");
+  assert.equal((await go("stop_sequence")).stopReason, "end_turn");
+  assert.equal((await go("pause_turn")).stopReason, "other");
 });

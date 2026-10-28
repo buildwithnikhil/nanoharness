@@ -14,6 +14,24 @@ export interface AnthropicOptions {
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
 
+/** How long to wait before a retry: the server's `retry-after` (seconds or an HTTP date) if it sent one, else exponential backoff. */
+function retryDelayMs(header: string | null, attempt: number): number {
+  if (header) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+    const at = Date.parse(header);
+    if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
+  }
+  return 500 * 2 ** attempt;
+}
+
+const ERROR_BODY_LIMIT = 1000;
+
+async function errorBody(res: Response): Promise<string> {
+  const text = await res.text().catch(() => "");
+  return text.length > ERROR_BODY_LIMIT ? `${text.slice(0, ERROR_BODY_LIMIT)}... [truncated ${text.length - ERROR_BODY_LIMIT} characters]` : text;
+}
+
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
@@ -31,6 +49,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 const STOP: Record<string, AdapterStopReason> = {
   end_turn: "end_turn",
+  refusal: "end_turn",
   stop_sequence: "end_turn",
   tool_use: "tool_use",
   max_tokens: "max_tokens",
@@ -81,6 +100,8 @@ export function anthropic(opts: AnthropicOptions): Adapter {
         res = await doFetch(url, {
           method: "POST",
           signal: req.signal,
+          // Never follow a redirect: the request carries your API key and the whole conversation.
+          redirect: "error",
           headers: {
             "content-type": "application/json",
             "x-api-key": opts.apiKey,
@@ -90,18 +111,21 @@ export function anthropic(opts: AnthropicOptions): Adapter {
         });
         if (res.ok || !RETRYABLE.has(res.status) || attempt >= maxRetries) break;
         await res.body?.cancel().catch(() => {}); // free the connection before waiting
-        const retryAfter = Number(res.headers.get("retry-after"));
-        const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
-        await sleep(Math.min(wait, 30_000), req.signal);
+        await sleep(Math.min(retryDelayMs(res.headers.get("retry-after"), attempt), 30_000), req.signal);
       }
       if (!res.ok) {
-        throw new Error(`Anthropic API error ${res.status}: ${await res.text()}`);
+        throw new Error(`Anthropic API error ${res.status}: ${await errorBody(res)}`);
       }
-      const data = (await res.json()) as {
+      let data: {
         content: Array<TextBlock | ToolUseBlock | { type: string }>;
         stop_reason: string;
         usage?: { input_tokens: number; output_tokens: number };
       };
+      try {
+        data = (await res.json()) as typeof data;
+      } catch {
+        throw new Error("Anthropic API returned invalid JSON");
+      }
       return {
         content: data.content.filter(
           (b): b is TextBlock | ToolUseBlock => b.type === "text" || b.type === "tool_use",

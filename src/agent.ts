@@ -1,6 +1,7 @@
 import type { Adapter, ContentBlock, Message, ToolResultBlock, ToolUseBlock, Usage } from "./types.js";
 import type { Budget, Tool, ToolContext } from "./tool.js";
-import { validate } from "./validate.js";
+import { appendUserInPlace } from "./messages.js";
+import { canonical, validate } from "./validate.js";
 
 export type Decision = "allow" | "deny" | { deny: string };
 
@@ -40,6 +41,8 @@ export interface RunOptions {
   toolConcurrency?: number;
   /** Most model calls allowed in total, counting every sub-agent. Stops with `budget_exceeded`. Default: no limit. */
   maxModelCalls?: number;
+  /** Called with the token usage of every model call, including those of sub-agents. Set by `defineAgent`. */
+  onUsage?: (usage: Usage) => void;
   /** Nesting level, set by `defineAgent` for sub-agents. Not normally set by hand. */
   depth?: number;
   /** Budget inherited from a parent run, set by `defineAgent` for sub-agents. Not normally set by hand. */
@@ -66,26 +69,58 @@ function stringify(v: unknown): string {
   return JSON.stringify(v) ?? "";
 }
 
+// Runs a tool and stops waiting for it when the run is aborted or `toolTimeoutMs` passes. The tool gets an
+// AbortSignal for both cases; a tool that ignores it keeps running in the background, but its result is dropped.
 async function runTool(tool: Tool, input: unknown, opts: RunOptions, base: ToolContext): Promise<unknown> {
+  const { signal } = opts;
   const ms = opts.toolTimeoutMs;
-  if (!ms) return tool.run(input, { ...base, signal: opts.signal });
+  if (!signal && !ms) return tool.run(input, { ...base });
 
   const ctl = new AbortController();
-  const onAbort = () => ctl.abort();
-  opts.signal?.addEventListener("abort", onAbort, { once: true });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      ctl.abort();
-      reject(new Error(`Tool timed out after ${ms}ms`));
-    }, ms);
-  });
-  try {
-    return await Promise.race([Promise.resolve(tool.run(input, { ...base, signal: ctl.signal })), timeout]);
-  } finally {
-    clearTimeout(timer);
-    opts.signal?.removeEventListener("abort", onAbort);
+  const cleanups: Array<() => void> = [];
+  const guards: Array<Promise<never>> = [];
+  if (signal) {
+    guards.push(
+      new Promise<never>((_, reject) => {
+        const onAbort = () => {
+          ctl.abort();
+          reject(new Error("Aborted"));
+        };
+        if (signal.aborted) return onAbort();
+        signal.addEventListener("abort", onAbort, { once: true });
+        cleanups.push(() => signal.removeEventListener("abort", onAbort));
+      }),
+    );
   }
+  if (ms) {
+    guards.push(
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => {
+          ctl.abort();
+          reject(new Error(`Tool timed out after ${ms}ms`));
+        }, ms);
+        cleanups.push(() => clearTimeout(timer));
+      }),
+    );
+  }
+  try {
+    const running = Promise.resolve().then(() => tool.run(input, { ...base, signal: ctl.signal }));
+    running.catch(() => {}); // a failure that arrives after an abort or timeout is ignored
+    return await Promise.race([running, ...guards]);
+  } finally {
+    for (const cleanup of cleanups) cleanup();
+  }
+}
+
+// Keeps the result within `max` characters, marker included, without cutting an emoji in half.
+function truncate(content: string, max: number): string {
+  if (content.length <= max) return content;
+  const reserve = `\n[truncated ${content.length} characters]`.length;
+  let keep = max - reserve;
+  const cut = (n: number) => (n > 0 && /[\uD800-\uDBFF]/.test(content[n - 1]!) ? n - 1 : n);
+  if (keep <= 0) return content.slice(0, cut(max));
+  keep = cut(keep);
+  return `${content.slice(0, keep)}\n[truncated ${content.length - keep} characters]`;
 }
 
 async function execute(
@@ -98,18 +133,30 @@ async function execute(
   let isError = false;
   let content: string;
 
-  try {
-    content = await dispatch(call, tools, opts, seen, base);
-  } catch (e) {
+  if (opts.signal?.aborted) {
     isError = true;
-    content = e instanceof Error ? e.message : String(e);
+    content = "Aborted before the tool could run.";
+  } else {
+    try {
+      content = await dispatch(call, tools, opts, seen, base);
+    } catch (e) {
+      isError = true;
+      content = e instanceof Error ? e.message : String(e);
+    }
   }
 
-  if (opts.onToolResult) content = await opts.onToolResult({ call, content, isError });
-  const max = opts.maxToolResultChars;
-  if (max !== undefined && content.length > max) {
-    content = `${content.slice(0, max)}\n[truncated ${content.length - max} characters]`;
+  if (opts.onToolResult) {
+    // A hook that fails or returns the wrong type must not let the raw output through, and must not end the run.
+    try {
+      const out = await opts.onToolResult({ call, content, isError });
+      if (typeof out !== "string") throw new TypeError("onToolResult must return a string");
+      content = out;
+    } catch {
+      isError = true;
+      content = "The tool result could not be processed.";
+    }
   }
+  if (opts.maxToolResultChars !== undefined) content = truncate(content, opts.maxToolResultChars);
   return { type: "tool_result", tool_use_id: call.id, content, ...(isError && { is_error: true }) };
 }
 
@@ -125,7 +172,7 @@ async function dispatch(
   if (!tool) throw new Error(`Unknown tool: ${call.name}`);
 
   if (opts.maxRepeatedCalls !== undefined) {
-    const key = `${call.name}:${JSON.stringify(call.input)}`;
+    const key = `${call.name}:${canonical(call.input)}`;
     const n = (seen.get(key) ?? 0) + 1;
     seen.set(key, n);
     if (n > opts.maxRepeatedCalls) {
@@ -169,14 +216,14 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     typeof opts.prompt === "string" ? [{ role: "user", content: opts.prompt }] : [...opts.prompt];
   const usage: Usage = { inputTokens: 0, outputTokens: 0 };
   const budget = opts.budget ?? (opts.maxModelCalls !== undefined ? { used: 0, max: opts.maxModelCalls } : undefined);
-  const base: ToolContext = {
-    depth: opts.depth ?? 0,
-    budget,
-    addUsage: (u) => {
-      usage.inputTokens += u.inputTokens;
-      usage.outputTokens += u.outputTokens;
-    },
+  // Every model call in this run, and in the sub-agents it starts, is counted here and reported upward as it happens,
+  // so usage is not lost when a sub-agent fails part-way.
+  const credit = (u: Usage) => {
+    usage.inputTokens += u.inputTokens;
+    usage.outputTokens += u.outputTokens;
+    opts.onUsage?.(u);
   };
+  const base: ToolContext = { depth: opts.depth ?? 0, budget, addUsage: credit };
   const concurrency = Math.max(1, Math.floor(opts.toolConcurrency ?? 1));
   let finalText = "";
   let stopReason: StopReason = "max_turns";
@@ -185,6 +232,7 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
   let evalRetries = 0;
 
   for (let turn = 0; turn < maxTurns; turn++) {
+    stopReason = "max_turns"; // stays this way if the loop ends because no turns are left
     if (signal?.aborted) {
       stopReason = "aborted";
       break;
@@ -207,8 +255,7 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
       throw e;
     }
 
-    usage.inputTokens += res.usage?.inputTokens ?? 0;
-    usage.outputTokens += res.usage?.outputTokens ?? 0;
+    if (res.usage) credit(res.usage);
     if (res.stopReason === "max_tokens" && res.content.some((b) => b.type === "tool_use")) {
       // A tool call cut off by the token limit has incomplete input, so it must not run.
       // The turn is dropped so the conversation stays valid and can be retried with a larger limit.
@@ -241,14 +288,15 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
         const verdict = await opts.evaluate({ finalText, messages });
         if (verdict !== true) {
           const feedback =
-            typeof verdict === "object" ? verdict.feedback : "Your answer was rejected. Please try again.";
+            typeof verdict === "object" && typeof verdict.feedback === "string" && verdict.feedback.trim()
+              ? verdict.feedback
+              : "Your answer was rejected. Please try again.";
           yield { type: "eval_rejected", feedback };
-          if (evalRetries >= maxEvalRetries) {
-            stopReason = "eval_failed";
-            break;
-          }
+          // An answer that was rejected is never reported as a success, even if no turns are left to retry.
+          stopReason = "eval_failed";
+          if (evalRetries >= maxEvalRetries) break;
           evalRetries++;
-          messages.push({ role: "user", content: feedback });
+          appendUserInPlace(messages, feedback);
           continue;
         }
       }

@@ -40,6 +40,44 @@ Install what you use: `npm install nanoharness nanoharness-anthropic` (and `nano
 - The Anthropic adapter sends only the fields the API defines for `tool_use` blocks, and both adapters release the connection of a response they are about to retry.
 - **OpenAI adapter:** a tool call cut off by the token limit (`finish_reason: "length"`) and a call with invalid JSON arguments are no longer run with an empty input.
 
+### Found and fixed by independent review before release
+
+Four reviewers each read the code with a different focus and reported only bugs they could reproduce.
+
+**Security**
+- The Anthropic and OpenAI adapters followed HTTP redirects, and the runtime forwards the `x-api-key` header (and, on a 307 or 308, the whole conversation) to the new host. Both adapters now refuse every redirect.
+- `nanoharness-fs`: a dangling symlink inside the root let `write_file` create a file outside it. Paths that exist but cannot be resolved are now refused, and files are opened with `O_NOFOLLOW`.
+- `nanoharness-fs`: `read_file` hung forever on a FIFO, and its size limit could be bypassed by a file that reports size 0 (such as those under `/proc`). It now opens the file, requires a regular file, and stops reading at the limit.
+
+**Core loop**
+- A rejected answer is no longer reported as `end_turn` when no turns are left. It is `eval_failed`, so agents and pipelines do not pass a rejected answer along as good.
+- Aborting is prompt. Queued tool calls are skipped (and answered with an error so the history stays valid), a tool that ignores its signal is no longer waited for, and an already-aborted signal reaches the tool even with `toolTimeoutMs`.
+- An `onToolResult` hook that throws or returns a non-string no longer crashes the run. The raw output is withheld and the model gets an error. Sibling tools no longer keep running after the run has settled.
+- `maxToolResultChars` is now a true cap with the truncation marker inside it, and never cuts an emoji in half.
+- Schema checks now also enforce `const`, `anyOf` / `oneOf` / `allOf`, `exclusiveMinimum` / `exclusiveMaximum`, `multipleOf`, `uniqueItems` and `additionalProperties` as a schema, and compare `enum` members by value. Before, a schema using these let invalid input through. A `pattern` that cannot compile, or a string over 100,000 characters, is reported instead of hanging.
+- `maxRepeatedCalls` no longer misses a repeat whose object keys were reordered.
+- Empty `evaluate` feedback falls back to a default message, and feedback after an empty reply no longer produces two user messages in a row.
+- On Node before 20.3, an agent's abort-signal fallback no longer leaks listeners.
+
+**Agents, graphs and stores**
+- Usage of a sub-agent that fails part-way is still counted, and is reported to the parent as it happens.
+- A graph that stopped on `max_steps` could never be resumed: every later call returned `max_steps` immediately. `maxSteps` now applies to each call.
+- A node returning a `next` that does not exist saved a checkpoint that made every resume throw. It now throws before saving.
+- The checkpoint is saved before `onStep` runs, so a throwing hook does not re-run the node that already ran.
+- With a store, graph state is saved as JSON after every node, so a resumed run sees the same state as an uninterrupted one. State that cannot be saved is reported at once.
+- Concurrent runs of one graph id are queued. `session().clear()` is queued behind a run in flight instead of being undone by it.
+- Node names are looked up as own properties, so a `next` of `"constructor"` is not a node.
+- `fileStore` (now in `nanoharness-fs`): writes to one key are applied in call order; long, empty and non-ASCII keys work (they were failing with `ENAMETOOLONG`); one stray file in the directory no longer breaks `keys()`; file names are safe on case-insensitive and Windows file systems; and `store.lock()` adds a lock that also holds across processes, which sessions and checkpointed graphs now use.
+
+**Adapters and Zod**
+- `Retry-After` is understood as an HTTP date as well as seconds. A 2xx body that is not JSON gives a clear error, and API error text is cut to 1,000 characters. Anthropic's `refusal` stop reason ends the turn. The OpenAI adapter leaves out an assistant message that has neither text nor tool calls.
+- `defineZodTool` shows the model the input schema (a field with a default is optional) and rejects a schema that is not a `z.object(...)` when the tool is defined.
+
+### Behaviour changes to know about
+- `fileStore` file names changed (and `nanoharness-fs` is a new package). Files written by `nanoharness` 1.x are still read, except where the 1.x name contained upper-case letters or special characters. Re-save those keys once.
+- `maxToolResultChars` output is now shorter than before for the same limit, because the marker counts toward it.
+- Schemas that used the keywords listed above now reject input that 1.x let through. That is the intent.
+
 ## 1.3.0 (2026-10-23)
 
 Multi-agent hardening, found by auditing how agents behave together.
