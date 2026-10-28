@@ -41,7 +41,7 @@ test("orchestrator delegates to a worker agent through asTool", async () => {
   assert.equal(leadAdapter.requests[1].messages.at(-1).content[0].content, "worker result: 42");
   assert.equal(workerAdapter.requests[0].system, "You are a worker");
   assert.equal(workerAdapter.requests[0].messages[0].content, "compute");
-  assert.deepEqual(events, ["lead:tool_call", "lead:tool_result", "lead:text", "lead:done"]);
+  assert.deepEqual(events, ["lead:model_call", "lead:tool_call", "lead:tool_result", "lead:model_call", "lead:text", "lead:done"]);
 });
 
 test("a sub-agent that stops early surfaces as a tool error", async () => {

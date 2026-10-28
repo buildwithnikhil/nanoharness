@@ -1,6 +1,6 @@
 {
   "name": "nanoharness-openai",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OpenAI-compatible chat model adapter for nanoharness: OpenAI, Ollama, vLLM, OpenRouter, LM Studio and more. Zero dependencies.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -60,7 +60,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "nanoharness": ">=2.0.0 <3"
+    "nanoharness": ">=2.1.0 <3"
   },
   "devDependencies": {
     "nanoharness": "file:../.."

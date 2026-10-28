@@ -25,6 +25,19 @@ const { finalText } = await run({
 | `baseUrl` | Where requests, and so the API key, are sent. Must be `https` (`http` only for `localhost`) and must not contain credentials. Default `https://api.anthropic.com`. |
 | `fetch` | A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. |
 
+## Streaming and errors
+
+Both `complete` and `stream` are supported. Pass `streaming: true` to `run`, `stream` or `defineAgent` to receive `text_delta` events as text arrives.
+
+A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `status`, `retryable`, and `retryAfterMs` when the server sent one. The adapter already retries on its own (`maxRetries`); to add jittered backoff on top, or to share a rate limit across agents, wrap it:
+
+```ts
+import { limitConcurrency, withRetry } from "nanoharness";
+const adapter = limitConcurrency(withRetry(anthropic({ ... })), 4);
+```
+
+Needs `nanoharness` 2.1 or later.
+
 Requests never follow redirects, so a misconfigured or hostile `baseUrl` cannot forward your key to another host. If you pass your own `fetch`, make sure it does the same. Error text from the API is cut to 1,000 characters.
 
 Zero dependencies. Node 18 or later. MIT.

@@ -34,7 +34,7 @@ test("evaluate: rejected answer is retried with feedback, then accepted", async 
     events.push(ev.type);
     if (ev.type === "done") result = ev.result;
   }
-  assert.deepEqual(events, ["text", "eval_rejected", "text", "done"]);
+  assert.deepEqual(events, ["model_call", "text", "eval_rejected", "model_call", "text", "done"]);
   assert.equal(result.finalText, "good");
   assert.equal(result.stopReason, "end_turn");
   assert.equal(adapter.requests[1].messages.at(-1).content, "say good");

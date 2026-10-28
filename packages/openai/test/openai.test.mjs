@@ -186,3 +186,95 @@ test("an assistant message with no text and no tool calls is left out of the req
   await a.complete({ tools: [], messages: [{ role: "user", content: "a" }, { role: "assistant", content: [] }, { role: "user", content: "b" }] });
   assert.deepEqual(sent.messages.map((m) => m.role), ["user", "user"]);
 });
+
+// ---------------- streaming and AdapterError
+import { AdapterError, withRetry } from "nanoharness";
+
+const chunks = (list, { splitEvery = 9 } = {}) => {
+  const text = list.map((c) => `data: ${typeof c === "string" ? c : JSON.stringify(c)}\n\n`).join("");
+  const bytes = new TextEncoder().encode(text);
+  return new Response(new ReadableStream({ start(c) { for (let i = 0; i < bytes.length; i += splitEvery) c.enqueue(bytes.slice(i, i + splitEvery)); c.close(); } }), { headers: { "content-type": "text/event-stream" } });
+};
+const delta = (d, finish = null) => ({ choices: [{ index: 0, delta: d, finish_reason: finish }] });
+
+test("streaming: text deltas, tool call arguments split over chunks, usage, [DONE]", async () => {
+  let sent;
+  const adapter = openai({ model: "m", fetch: async (_, init) => ((sent = JSON.parse(init.body)), chunks([
+    delta({ role: "assistant", content: "" }),
+    delta({ content: "Adding" }),
+    delta({ content: " now." }),
+    delta({ tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "add", arguments: "" } }] }),
+    delta({ tool_calls: [{ index: 0, function: { arguments: '{"a":' } }] }),
+    delta({ tool_calls: [{ index: 0, function: { arguments: '2,"b":3}' } }] }),
+    delta({ tool_calls: [{ index: 1, id: "call_2", function: { name: "add", arguments: '{"a":1,"b":1}' } }] }),
+    delta({}, "tool_calls"),
+    { choices: [], usage: { prompt_tokens: 7, completion_tokens: 5 } },
+    "[DONE]",
+  ])) });
+  const evs = [];
+  for await (const e of adapter.stream({ messages: [{ role: "user", content: "x" }], tools: [] })) evs.push(e);
+  assert.equal(sent.stream, true);
+  assert.deepEqual(sent.stream_options, { include_usage: true });
+  assert.deepEqual(evs.filter((e) => e.type === "text_delta").map((e) => e.text), ["Adding", " now."]);
+  const r = evs.at(-1).response;
+  assert.deepEqual(r.content, [
+    { type: "text", text: "Adding now." },
+    { type: "tool_use", id: "call_1", name: "add", input: { a: 2, b: 3 } },
+    { type: "tool_use", id: "call_2", name: "add", input: { a: 1, b: 1 } },
+  ]);
+  assert.equal(r.stopReason, "tool_use");
+  assert.deepEqual(r.usage, { inputTokens: 7, outputTokens: 5 });
+});
+
+test("streaming: a full run, streamUsage off, length wins over tool calls, early end and error chunks", async () => {
+  let n = 0, body;
+  const add = defineTool({ name: "add", description: "", schema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => a + b });
+  const adapter = openai({ model: "m", streamUsage: false, fetch: async (_, init) => ((body = JSON.parse(init.body)), n++ === 0
+    ? chunks([delta({ tool_calls: [{ index: 0, id: "c", function: { name: "add", arguments: '{"a":2,"b":3}' } }] }, "tool_calls"), "[DONE]"])
+    : chunks([delta({ content: "5" }, "stop"), "[DONE]"])) });
+  const r = await run({ adapter, prompt: "x", tools: [add], streaming: true });
+  assert.equal(r.finalText, "5");
+  assert.equal("stream_options" in body, false);
+  const cutOff = openai({ model: "m", fetch: async () => chunks([delta({ tool_calls: [{ index: 0, id: "c", function: { name: "add", arguments: '{"a":' } }] }, "length"), "[DONE]"]) });
+  const evs = []; for await (const e of cutOff.stream({ messages: [], tools: [] })) evs.push(e);
+  assert.equal(evs.at(-1).response.stopReason, "max_tokens");
+  const early = openai({ model: "m", fetch: async () => chunks([delta({ content: "par" })]) });
+  await assert.rejects(async () => { for await (const _ of early.stream({ messages: [], tools: [] })); }, /ended early/);
+  const err = openai({ model: "m", fetch: async () => chunks([{ error: { message: "model overloaded" } }]) });
+  await assert.rejects(async () => { for await (const _ of err.stream({ messages: [], tools: [] })); }, /model overloaded/);
+});
+
+test("failures are AdapterErrors with the status, so withRetry can act on them", async () => {
+  const e = await openai({ model: "m", maxRetries: 0, fetch: async () => new Response("busy", { status: 503 }) }).complete({ messages: [], tools: [] }).catch((x) => x);
+  assert.ok(e instanceof AdapterError);
+  assert.equal(e.status, 503);
+  assert.equal(e.retryable, true);
+  let n = 0;
+  const adapter = withRetry(openai({ model: "m", maxRetries: 0, fetch: async () => (n++ === 0 ? new Response("x", { status: 429 }) : reply({ content: "ok" })) }), { baseDelayMs: 1 });
+  assert.equal((await run({ adapter, prompt: "x" })).finalText, "ok");
+});
+
+test("streaming over real HTTP: deltas arrive while the server is still sending", async () => {
+  let lastSentAt = Infinity;
+  const list = [delta({ content: "one " }), delta({ content: "two " }), delta({ content: "three" }, "stop"), { choices: [], usage: { prompt_tokens: 1, completion_tokens: 3 } }, "[DONE]"];
+  const server = http.createServer(async (req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    for (const [i, c] of list.entries()) {
+      if (i === list.length - 1) { await new Promise((r) => setTimeout(r, 150)); lastSentAt = Date.now(); }
+      res.write(`data: ${typeof c === "string" ? c : JSON.stringify(c)}\n\n`);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const adapter = openai({ model: "m", baseUrl: `http://127.0.0.1:${server.address().port}/v1` });
+    const arrivals = [];
+    const r = await run({ adapter, prompt: "x", streaming: true, onEvent: (e) => e.type === "text_delta" && arrivals.push(Date.now()) });
+    assert.equal(r.finalText, "one two three");
+    assert.deepEqual(r.usage, { inputTokens: 1, outputTokens: 3 });
+    // Streaming means text is in hand before the server has finished sending, not all at once at the end.
+    assert.ok(arrivals[2] < lastSentAt, `last delta arrived ${arrivals[2] - lastSentAt}ms relative to the final chunk being sent`);
+  } finally { server.close(); server.closeAllConnections?.(); }
+});

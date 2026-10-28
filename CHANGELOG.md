@@ -2,6 +2,33 @@
 
 All notable changes are listed here. This project follows [semantic versioning](https://semver.org). The companion packages (`nanoharness-anthropic`, `nanoharness-openai`, `nanoharness-fs`) are versioned on their own and are listed under the core release they first shipped with.
 
+## 2.1.0 (unreleased)
+
+Everything here is opt-in and adds no dependencies. The core still has no network or filesystem code. Released together with `nanoharness-anthropic` 1.1.0 and `nanoharness-openai` 1.1.0 (streaming and `AdapterError`); publish the core first, since both need it.
+
+### Added
+- **Streaming.** `streaming: true` on `run`, `stream` and `defineAgent` uses the adapter's new optional `stream` method and emits `text_delta` events. `nanoharness-anthropic` and `nanoharness-openai` both stream.
+- **Custom models.**
+  - `promptAdapter({ generate })` gives tool calling to any text-in, text-out model.
+  - `defineAdapter` types a hand-written adapter.
+  - `readSSE` reads a streaming (Server-Sent Events) response.
+  - `AdapterError` carries the HTTP status, whether to retry, and `retryAfterMs`. Both official adapters now throw it.
+- **Scaling helpers.**
+  - `limitConcurrency(adapter, n)` caps calls in flight across all runs and agents.
+  - `withRetry(adapter, opts)` adds retry with jittered backoff to any adapter.
+- **Long conversations.** `session(store, id, { maxMessages, summarize })` keeps a session's history bounded, cutting at a safe point and optionally keeping a summary of what was dropped. `trimHistory` is the same as a plain function.
+- **Tracing.**
+  - `onEvent` on `run()`.
+  - A `model_call` event after every model call, with `durationMs`, `usage` and `stopReason`.
+  - `tool_result` events now carry `durationMs`.
+- **Custom stores.** `checkStore(store)` checks a store you wrote. The README has a Redis example.
+- `Adapter.stream`, `AdapterStreamEvent` and `RunOptions.streaming` / `onEvent` in the types.
+
+### Changed
+- `stream()` (and `onEvent`) now also emits `model_call` events. Code that compares the exact sequence of events will see the new event; code that switches on `ev.type` is unaffected.
+- The description no longer calls the package "for small apps".
+- `nanoharness-anthropic` and `nanoharness-openai` 1.1.0 need `nanoharness` 2.1 or later. `nanoharness-fs` is unchanged (still 1.0.0).
+
 ## 2.0.0 (2026-10-28)
 
 The core package no longer contains any network or filesystem code. The Anthropic adapter and the file tools moved into companion packages, so `nanoharness` itself has no `fetch`, no `fs` and no URLs. This is a breaking release.

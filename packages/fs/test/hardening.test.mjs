@@ -192,3 +192,8 @@ test("L1: a holder that lost its lock does not delete the lock of whoever took o
   assert.equal(left.length, 1, "the other holder's lock file is still there");
   assert.equal(await fsp.readFile(path.join(dir, left[0]), "utf8"), "another holder's token");
 });
+
+test("fileStore passes the store contract check, including its lock", async () => {
+  const { checkStore } = await import("nanoharness/store");
+  assert.deepEqual(await checkStore(fileStore(await tmp("nh-check-"))), []);
+});

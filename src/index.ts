@@ -5,3 +5,6 @@ export { run, stream } from "./agent.js";
 export type { RunOptions, RunResult, AgentEvent, Decision, StopReason, EvalResult, ToolResultInfo } from "./agent.js";
 export { allowTools, markUntrusted } from "./policy.js";
 export { validate } from "./validate.js";
+export { AdapterError, defineAdapter, limitConcurrency, promptAdapter, readSSE, withRetry } from "./adapter-kit.js";
+export type { PromptAdapterOptions, RetryOptions } from "./adapter-kit.js";
+export { trimHistory } from "./history.js";

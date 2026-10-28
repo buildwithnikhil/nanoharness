@@ -3,9 +3,10 @@
 A lightweight, zero-dependency agent harness. You give it a model adapter and some tools. It runs the tool-use loop.
 
 - **Zero runtime dependencies, and no network or filesystem code in the core.** Talking to a model or to disk lives in small companion packages you opt into.
-- **Provider-agnostic.** A model provider is one method: `complete(request) → response`. Adapters for Anthropic and for OpenAI-compatible servers are published separately.
+- **Any model.** A model provider is one method: `complete(request) → response`. Adapters for Anthropic and for OpenAI-compatible servers are published separately, and `promptAdapter` gives tool calling to any text-in, text-out model.
 - **Bring your own tools.** There are no built-in tools and no shell access. Sandboxed file tools are an optional companion package.
 - **Scales up when you need it.** Multi-agent orchestration, planning, workflow graphs and sessions are opt-in subpath imports (`nanoharness/agents`, `/graph`, `/store`). Apps that don't import them don't pay for them.
+- **Streaming, tracing and scaling helpers.** Token streaming, timing events, shared rate limits, retries for any adapter, and bounded conversation history. All opt-in.
 - **ESM and CJS**, with types. Node 18 or later.
 
 | Package | What it is |
@@ -140,13 +141,160 @@ await chat.run({ adapter, prompt: "Who am I?" }); // remembers, even after a res
 
 Runs and `clear()` on the same session id are queued in order. That holds across processes too when the store has a `lock`, as `fileStore` from `nanoharness-fs` does (it is a lock file with a heartbeat, for a few cooperating processes on one local disk, not for network file systems). For a store without `lock`, such as `memoryStore`, or your own, it holds only for runs that share one `store` object in one process.
 
-A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. Sessions keep the whole history, so a long-lived session grows until you `clear()` it or trim it yourself.
+**Long conversations.** A session keeps every message by default, so a long-lived one eventually exceeds the model's context window. Pass `maxMessages` to keep only the most recent part (cut at a point where no tool result is separated from its tool call), and optionally `summarize` to keep a summary of what was dropped:
+
+```ts
+import { session } from "nanoharness/store";
+
+const chat = session(store, "user-42", {
+  maxMessages: 40,
+  summarize: async (dropped) => (await summarizer.run(JSON.stringify(dropped))).finalText, // optional
+});
+```
+
+The summary is placed at the front of the kept history and is itself summarised again later. `trimHistory(messages, { maxMessages })` is the same trimming as a plain function, for histories you manage yourself.
+
+A `Store` is four methods (`get`, `set`, `delete`, `keys`), plus an optional `lock` for stores shared by several processes, so you can back it with Redis, Postgres or anything else in a few lines. Run `checkStore(yourStore)` from `nanoharness/store` to confirm it behaves as expected; it returns a list of problems, empty when it passes.
+
+<details>
+<summary>Example: a Redis store (with the <code>ioredis</code> package)</summary>
+
+```ts
+import Redis from "ioredis";
+import type { Store } from "nanoharness";
+
+export function redisStore(redis: Redis, prefix = "nh:"): Store {
+  return {
+    get: async (key) => { const v = await redis.get(prefix + key); return v === null ? undefined : JSON.parse(v); },
+    set: async (key, value) => void (await redis.set(prefix + key, JSON.stringify(value))),
+    delete: async (key) => void (await redis.del(prefix + key)),
+    keys: async (p = "") => {
+      const found: string[] = [];
+      let cursor = "0";
+      do {
+        const [next, batch] = await redis.scan(cursor, "MATCH", `${prefix}${p}*`, "COUNT", 500);
+        cursor = next;
+        found.push(...batch.map((k) => k.slice(prefix.length)));
+      } while (cursor !== "0");
+      return found;
+    },
+  };
+}
+```
+
+Glob characters (`*`, `?`, `[`) in a prefix passed to `keys()` are treated as patterns by Redis, so keep them out of prefixes. Add a `lock` (for example with a Redis lock library) if several processes share sessions or graph ids.
+</details> `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. Sessions keep the whole history, so a long-lived session grows until you `clear()` it or trim it yourself.
+
+## Streaming
+
+Pass `streaming: true` and the run uses the adapter's `stream` method, emitting `text_delta` events as text arrives. Both official adapters support it. An adapter without `stream` falls back to `complete`, so the option is always safe to set.
+
+```ts
+import { stream } from "nanoharness";
+
+for await (const ev of stream({ adapter, prompt, tools, streaming: true })) {
+  if (ev.type === "text_delta") process.stdout.write(ev.text);
+}
+```
+
+The final `text` event and the result are the same as without streaming. `defineAgent` accepts `streaming` too.
+
+## Custom models
+
+There are three ways to connect a model that has no official adapter.
+
+**1. OpenAI-compatible servers** (Ollama, vLLM, LM Studio, OpenRouter, Groq, Together and others) work with [`nanoharness-openai`](packages/openai) by setting `baseUrl`.
+
+**2. Any text-in, text-out model** (a local model, a CLI, an API without native tool calling) works with `promptAdapter`. You write one function that sends text and returns text; tools are described in the system text and the model calls them by replying with JSON.
+
+```ts
+import { run, promptAdapter } from "nanoharness";
+
+const adapter = promptAdapter({
+  generate: async ({ system, prompt, signal }) => {
+    const res = await fetch("http://localhost:8080/generate", { method: "POST", body: JSON.stringify({ system, prompt }), signal });
+    return (await res.json()).text; // or { text, usage: { inputTokens, outputTokens } }
+  },
+});
+await run({ adapter, prompt: "What is 12 * 7?", tools: [multiply] });
+```
+
+How well this works depends on the model following the instructions; capable instruction-tuned models do it reliably. A malformed tool call is not run, and the model is told what was wrong.
+
+**3. Your own adapter**, for an API with native tool calling. Translate the request, call the provider, translate the reply. Throw `AdapterError` with the HTTP status on failure, so `withRetry` knows what to retry. `readSSE` reads a streaming response if you also want `stream`.
+
+```ts
+import { AdapterError, defineAdapter, readSSE } from "nanoharness";
+
+const myModel = defineAdapter({
+  async complete({ system, messages, tools, signal }) {
+    const res = await fetch("https://api.example.com/chat", {
+      method: "POST",
+      signal,
+      redirect: "error", // never forward your key to another host
+      headers: { authorization: `Bearer ${process.env.EXAMPLE_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ system, messages, tools }), // translate to the provider's format here
+    });
+    if (!res.ok) throw new AdapterError(`Example API error ${res.status}`, { status: res.status });
+    const data = await res.json();
+    return { content: [{ type: "text", text: data.text }], stopReason: "end_turn", usage: { inputTokens: data.in, outputTokens: data.out } };
+  },
+  async *stream(req) {
+    const res = await fetch("https://api.example.com/chat?stream=1", { method: "POST", signal: req.signal, redirect: "error", body: JSON.stringify(req) });
+    if (!res.ok || !res.body) throw new AdapterError(`Example API error ${res.status}`, { status: res.status });
+    let text = "";
+    for await (const { data } of readSSE(res.body)) {
+      const piece = JSON.parse(data).delta ?? "";
+      text += piece;
+      yield { type: "text_delta", text: piece };
+    }
+    yield { type: "response", response: { content: [{ type: "text", text }], stopReason: "end_turn" } };
+  },
+});
+```
+
+The contract:
+- `complete` returns `content` (`text` and `tool_use` blocks), a `stopReason` (`end_turn`, `tool_use`, `max_tokens` or `other`) and optional `usage`.
+- `stream`, if present, yields any number of `text_delta` events and then exactly one `response`.
+- Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Translate to and from it, as `nanoharness-openai` does.
+- If a provider returns a malformed tool call, set `error` on the `tool_use` block. The harness will not run it and will tell the model what was wrong. If the output was cut off by the token limit, return `stopReason: "max_tokens"` so truncated calls are not run.
+
+## Scaling up
+
+These wrap any adapter, official or custom, and stack in any order.
+
+```ts
+import { limitConcurrency, withRetry } from "nanoharness";
+import { anthropic } from "nanoharness-anthropic";
+
+// At most 4 calls in flight across every run and agent sharing this adapter, each retried on 429 / 5xx.
+const shared = limitConcurrency(withRetry(anthropic({ apiKey }), { maxRetries: 3 }), 4);
+```
+
+| Helper | What it does |
+|---|---|
+| `limitConcurrency(adapter, n)` | At most `n` calls to the adapter at once, across all runs and agents that use it. Waiting calls leave the queue if their run is aborted. |
+| `withRetry(adapter, opts)` | Retries an `AdapterError` marked retryable (408, 429, 5xx) and `fetch` network failures, with jittered backoff that honours the server's `retry-after`. A stream is retried only if it failed before any text arrived. `retryable` lets you decide for other errors. |
+| `session(..., { maxMessages, summarize })` | Keeps long conversations within the context window. See Persistence. |
+| `onEvent` on `run()` | Every event, for logs and traces. `model_call` events carry `durationMs`, `usage` and `stopReason`; `tool_result` events carry `durationMs`. |
+
+```ts
+import { run } from "nanoharness";
+
+await run({
+  adapter, prompt, tools,
+  onEvent: (ev) => {
+    if (ev.type === "model_call") metrics.observe("model_ms", ev.durationMs, ev.usage);
+    if (ev.type === "tool_result") metrics.observe(`tool_ms`, ev.durationMs);
+  },
+});
+```
 
 ## API
 
 ### `run(options)` and `stream(options)`
 
-`run` returns `{ messages, finalText, stopReason, usage }`. `stream` is an async generator over the same loop, yielding `text`, `tool_call`, `tool_result` and a final `done` event (whose `result` is the same object `run` returns). `run` is the stream collected to the end.
+`run` returns `{ messages, finalText, stopReason, usage }`. `stream` is an async generator over the same loop, yielding `model_call`, `text`, `tool_call`, `tool_result` (and `text_delta` when streaming, `eval_rejected` when an answer is rejected), then a final `done` event whose `result` is the same object `run` returns. `run` is the stream collected to the end.
 
 ```ts
 for await (const ev of stream({ adapter, prompt, tools })) {
@@ -163,6 +311,8 @@ for await (const ev of stream({ adapter, prompt, tools })) {
 | `maxTurns` | Default `20`. Stops with `stopReason: "max_turns"`. |
 | `signal` | An `AbortSignal`. Stops with `stopReason: "aborted"`. |
 | `onToolCall` | `(call) => "allow" \| "deny" \| { deny: reason }`, called before each tool runs. |
+| `streaming` | Use the adapter's `stream` and emit `text_delta` events. Default `false`. |
+| `onEvent` | Called with every event when you use `run()`. |
 
 `stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`. A rejected answer is never `end_turn`: if `evaluate` rejects it and no retries or turns are left, the result is `eval_failed`.
 
@@ -241,26 +391,13 @@ const tools = createFsTools({ root: "./workspace" }); // read_file, list_dir
 // createFsTools({ root, allowWrite: true }) also adds write_file
 ```
 
-### Writing an adapter
+### Adapters
 
-```ts
-const myAdapter: Adapter = {
-  async complete({ system, messages, tools, signal }) {
-    // call your provider, then return:
-    return { content: [{ type: "text", text: "..." }], stopReason: "end_turn" };
-  },
-};
-```
-
-If a provider returns a malformed tool call, set `error` on the `tool_use` block you return. The harness will not run it and will tell the model what was wrong. If the output was cut off by the token limit, return `stopReason: "max_tokens"` so truncated calls are not run.
-
-The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), retry rate limits and server errors with backoff, never follow a redirect (so your key and conversation cannot be forwarded to another host), and refuse to send your API key over plain http to a remote host. A custom adapter decides its own retry and redirect policy.
-
-Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it, as `nanoharness-openai` does.
+See [Custom models](#custom-models) for writing one. The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), support streaming, retry rate limits and server errors with backoff, throw `AdapterError` with the status, never follow a redirect (so your key and conversation cannot be forwarded to another host), and refuse to send your API key over plain http to a remote host.
 
 ## Not included
 
-Token-level streaming, images and other non-text content, shell tools, automatic summarisation or trimming of long conversations, parallel branches inside a graph (use `parallel()` inside a node), and a database-backed store. The event stream is additive, so token deltas can be added later without breaking the API.
+Images and other non-text content, shell tools, trimming within a single long `run()` (sessions trim between runs), parallel branches inside a graph (use `parallel()` inside a node), and a shipped database-backed store (write one in a few lines, see Persistence).
 
 ## Contributing and security
 
