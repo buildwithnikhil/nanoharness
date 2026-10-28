@@ -62,9 +62,13 @@ export interface AdapterResponse {
   usage?: Usage;
 }
 
-/** The only surface a model provider has to implement. */
+/** What an adapter's optional `stream` yields: text as it arrives, then exactly one final response. */
+export type AdapterStreamEvent = { type: "text_delta"; text: string } | { type: "response"; response: AdapterResponse };
+
+/** The only surface a model provider has to implement. `stream` is optional and used when a run asks for streaming. */
 export interface Adapter {
   complete(req: AdapterRequest): Promise<AdapterResponse>;
+  stream?(req: AdapterRequest): AsyncIterable<AdapterStreamEvent>;
 }
 
 /** Minimal key-value persistence used by sessions, plans and graph checkpoints. */

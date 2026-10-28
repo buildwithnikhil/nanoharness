@@ -1,6 +1,6 @@
 {
   "name": "nanoharness-anthropic",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Anthropic (Claude) model adapter for nanoharness. Retries rate limits, validates the base URL, zero dependencies.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -58,7 +58,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "nanoharness": ">=2.0.0 <3"
+    "nanoharness": ">=2.1.0 <3"
   },
   "devDependencies": {
     "nanoharness": "file:../.."

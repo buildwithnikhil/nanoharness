@@ -23,7 +23,7 @@ function anySignal(signals: AbortSignal[]): { signal: AbortSignal; dispose: () =
   return { signal: ctl.signal, dispose: () => cleanups.forEach((c) => c()) };
 }
 
-export interface AgentConfig extends Omit<RunOptions, "prompt"> {
+export interface AgentConfig extends Omit<RunOptions, "prompt" | "onEvent"> {
   /** Also the tool name when used via `asTool`, so it must match [a-zA-Z0-9_-]{1,64}. */
   name: string;
   /** Most model calls in total across this agent and all its sub-agents. Default 200; set Infinity to disable. */

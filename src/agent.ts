@@ -1,4 +1,4 @@
-import type { Adapter, ContentBlock, Message, ToolResultBlock, ToolUseBlock, Usage } from "./types.js";
+import type { Adapter, AdapterResponse, ContentBlock, Message, ToolResultBlock, ToolUseBlock, Usage } from "./types.js";
 import type { Budget, Tool, ToolContext } from "./tool.js";
 import { appendUserInPlace } from "./messages.js";
 import { canonical, validate } from "./validate.js";
@@ -41,6 +41,10 @@ export interface RunOptions {
   toolConcurrency?: number;
   /** Most model calls allowed in total, counting every sub-agent. Stops with `budget_exceeded`. Default: no limit. */
   maxModelCalls?: number;
+  /** Use the adapter's `stream` (when it has one) and emit `text_delta` events as text arrives. Default false. */
+  streaming?: boolean;
+  /** Called with every event of the run, for logging and tracing when you use `run()` rather than `stream()`. */
+  onEvent?: (event: AgentEvent) => void;
   /** Called with the token usage of every model call, including those of sub-agents. Set by `defineAgent`. */
   onUsage?: (usage: Usage) => void;
   /** Nesting level, set by `defineAgent` for sub-agents. Not normally set by hand. */
@@ -57,9 +61,11 @@ export interface RunResult {
 }
 
 export type AgentEvent =
+  | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
+  | { type: "model_call"; durationMs: number; stopReason: AdapterResponse["stopReason"]; usage?: Usage }
   | { type: "tool_call"; call: ToolUseBlock }
-  | { type: "tool_result"; result: ToolResultBlock }
+  | { type: "tool_result"; result: ToolResultBlock; durationMs: number }
   | { type: "eval_rejected"; feedback: string }
   | { type: "done"; result: RunResult };
 
@@ -247,9 +253,19 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     }
     if (budget) budget.used++;
 
-    let res;
+    let res: AdapterResponse | undefined;
+    const started = Date.now();
     try {
-      res = await adapter.complete({ system: opts.system, messages, tools: specs, signal });
+      const req = { system: opts.system, messages, tools: specs, signal };
+      if (opts.streaming && adapter.stream) {
+        for await (const ev of adapter.stream(req)) {
+          if (ev.type === "text_delta") yield { type: "text_delta", text: ev.text };
+          else res = ev.response;
+        }
+        if (!res) throw new Error("The adapter's stream ended without a response");
+      } else {
+        res = await adapter.complete(req);
+      }
     } catch (e) {
       if (signal?.aborted) {
         stopReason = "aborted";
@@ -259,6 +275,7 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     }
 
     if (res.usage) credit(res.usage);
+    yield { type: "model_call", durationMs: Date.now() - started, stopReason: res.stopReason, ...(res.usage ? { usage: res.usage } : {}) };
     if (res.stopReason === "max_tokens" && res.content.some((b) => b.type === "tool_use")) {
       // A tool call cut off by the token limit has incomplete input, so it must not run.
       // The turn is dropped so the conversation stays valid and can be retried with a larger limit.
@@ -309,24 +326,28 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     const results: ToolResultBlock[] = [];
     if (concurrency === 1) {
       for (const call of calls) {
+        const t = Date.now();
         const result = await execute(call, tools, opts, seen, base);
         results.push(result);
-        yield { type: "tool_result", result };
+        yield { type: "tool_result", result, durationMs: Date.now() - t };
       }
     } else {
       // Results are reported in call order once the batch finishes.
       let next = 0;
       const out: ToolResultBlock[] = new Array(calls.length);
+      const took: number[] = new Array(calls.length);
       const worker = async () => {
         while (next < calls.length) {
           const i = next++;
+          const t = Date.now();
           out[i] = await execute(calls[i]!, tools, opts, seen, base);
+          took[i] = Date.now() - t;
         }
       };
       await Promise.all(Array.from({ length: Math.min(concurrency, calls.length) }, worker));
-      for (const result of out) {
+      for (const [i, result] of out.entries()) {
         results.push(result);
-        yield { type: "tool_result", result };
+        yield { type: "tool_result", result, durationMs: took[i]! };
       }
     }
     messages.push({ role: "user", content: results });
@@ -342,5 +363,6 @@ export async function run(opts: RunOptions): Promise<RunResult> {
   for (;;) {
     const next = await it.next();
     if (next.done) return next.value;
+    opts.onEvent?.(next.value);
   }
 }

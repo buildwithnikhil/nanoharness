@@ -49,7 +49,7 @@ test("stream emits events in order and ends with done", async () => {
   const adapter = fake(call("t1", "add", { a: 1, b: 1 }), text("2"));
   const types = [];
   for await (const ev of stream({ adapter, prompt: "x", tools: [add] })) types.push(ev.type);
-  assert.deepEqual(types, ["tool_call", "tool_result", "text", "done"]);
+  assert.deepEqual(types, ["model_call", "tool_call", "tool_result", "model_call", "text", "done"]);
 });
 
 test("invalid arguments go back to the model as is_error", async () => {

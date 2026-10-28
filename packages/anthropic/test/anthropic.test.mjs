@@ -192,3 +192,99 @@ test("stop reasons: refusal ends the turn, unknown ones map to other", async () 
   assert.equal((await go("stop_sequence")).stopReason, "end_turn");
   assert.equal((await go("pause_turn")).stopReason, "other");
 });
+
+// ---------------- streaming and AdapterError
+import { AdapterError, withRetry, defineTool } from "nanoharness";
+
+const sseResponse = (events, { splitEvery = 7 } = {}) => {
+  const text = events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  const bytes = new TextEncoder().encode(text);
+  return new Response(new ReadableStream({ start(c) { for (let i = 0; i < bytes.length; i += splitEvery) c.enqueue(bytes.slice(i, i + splitEvery)); c.close(); } }), { headers: { "content-type": "text/event-stream" } });
+};
+const anthropicStream = (blocks, stop = "end_turn") => [
+  ["message_start", { type: "message_start", message: { usage: { input_tokens: 11, output_tokens: 1 } } }],
+  ...blocks.flatMap((b, index) =>
+    b.type === "text"
+      ? [["content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } }],
+         ...b.parts.map((t) => ["content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: t } }]),
+         ["content_block_stop", { type: "content_block_stop", index }]]
+      : [["content_block_start", { type: "content_block_start", index, content_block: { type: "tool_use", id: b.id, name: b.name, input: {} } }],
+         ...b.parts.map((p) => ["content_block_delta", { type: "content_block_delta", index, delta: { type: "input_json_delta", partial_json: p } }]),
+         ["content_block_stop", { type: "content_block_stop", index }]]),
+  ["ping", { type: "ping" }],
+  ["message_delta", { type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 42 } }],
+  ["message_stop", { type: "message_stop" }],
+];
+
+test("streaming: text deltas, tool input assembled from pieces, usage and stop reason", async () => {
+  let sent;
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => ((sent = JSON.parse(init.body)), sseResponse(anthropicStream([{ type: "text", parts: ["Let me ", "add."] }, { type: "tool_use", id: "tu1", name: "add", parts: ['{"a": 2', ', "b": 3}'] }], "tool_use"))) });
+  const events = [];
+  for await (const ev of adapter.stream({ messages: [{ role: "user", content: "x" }], tools: [] })) events.push(ev);
+  assert.equal(sent.stream, true);
+  assert.deepEqual(events.filter((e) => e.type === "text_delta").map((e) => e.text), ["Let me ", "add."]);
+  const final = events.at(-1).response;
+  assert.deepEqual(final.content, [{ type: "text", text: "Let me add." }, { type: "tool_use", id: "tu1", name: "add", input: { a: 2, b: 3 } }]);
+  assert.equal(final.stopReason, "tool_use");
+  assert.deepEqual(final.usage, { inputTokens: 11, outputTokens: 42 });
+});
+
+test("streaming: a full run with a tool, end to end", async () => {
+  const add = defineTool({ name: "add", description: "", schema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => a + b });
+  let n = 0;
+  const adapter = anthropic({ apiKey: "k", fetch: async () => sseResponse(n++ === 0 ? anthropicStream([{ type: "tool_use", id: "t1", name: "add", parts: ['{"a":2,"b":3}'] }], "tool_use") : anthropicStream([{ type: "text", parts: ["It is ", "5."] }])) });
+  const deltas = [];
+  const r = await run({ adapter, prompt: "2+3", tools: [add], streaming: true, onEvent: (e) => e.type === "text_delta" && deltas.push(e.text) });
+  assert.equal(r.finalText, "It is 5.");
+  assert.deepEqual(deltas, ["It is ", "5."]);
+});
+
+test("streaming: malformed tool JSON is flagged, an error event throws, and an early end is reported", async () => {
+  const bad = anthropic({ apiKey: "k", fetch: async () => sseResponse(anthropicStream([{ type: "tool_use", id: "t", name: "x", parts: ['{"a": '] }], "tool_use")) });
+  const evs = []; for await (const e of bad.stream({ messages: [], tools: [] })) evs.push(e);
+  assert.equal(evs.at(-1).response.content[0].error, "arguments were not valid JSON");
+  const err = anthropic({ apiKey: "k", fetch: async () => sseResponse([["message_start", { type: "message_start", message: { usage: {} } }], ["error", { type: "error", error: { type: "overloaded_error", message: "Overloaded" } }]]) });
+  await assert.rejects(async () => { for await (const _ of err.stream({ messages: [], tools: [] })); }, (e) => e instanceof AdapterError && /Overloaded/.test(e.message) && e.retryable === true);
+  const cut = anthropic({ apiKey: "k", fetch: async () => sseResponse(anthropicStream([{ type: "text", parts: ["a"] }]).slice(0, 3)) });
+  await assert.rejects(async () => { for await (const _ of cut.stream({ messages: [], tools: [] })); }, /ended early/);
+});
+
+test("failures are AdapterErrors with the status, so withRetry can act on them", async () => {
+  const limited = anthropic({ apiKey: "k", maxRetries: 0, fetch: async () => new Response("slow down", { status: 429, headers: { "retry-after": "0.02" } }) });
+  const err = await limited.complete({ messages: [{ role: "user", content: "x" }], tools: [] }).catch((e) => e);
+  assert.ok(err instanceof AdapterError);
+  assert.equal(err.status, 429);
+  assert.equal(err.retryable, true);
+  assert.equal(err.retryAfterMs, 20);
+  let n = 0;
+  const adapter = withRetry(anthropic({ apiKey: "k", maxRetries: 0, fetch: async () => (n++ === 0 ? new Response("x", { status: 503 }) : new Response(okBody("ok"))) }), { baseDelayMs: 1 });
+  assert.equal((await run({ adapter, prompt: "x" })).finalText, "ok");
+  const bad = await anthropic({ apiKey: "k", fetch: async () => new Response("no", { status: 401 }) }).complete({ messages: [], tools: [] }).catch((e) => e);
+  assert.equal(bad.status, 401);
+  assert.equal(bad.retryable, false);
+});
+
+test("streaming over real HTTP: deltas arrive while the server is still sending", async () => {
+  const events = anthropicStream([{ type: "text", parts: ["one ", "two ", "three"] }]);
+  let lastSentAt = Infinity;
+  const server = http.createServer(async (req, res) => {
+    req.resume();
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    for (const [i, [event, data]] of events.entries()) {
+      if (i === events.length - 1) { await new Promise((r) => setTimeout(r, 150)); lastSentAt = Date.now(); }
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const adapter = anthropic({ apiKey: "k", baseUrl: `http://127.0.0.1:${server.address().port}` });
+    const arrivals = [];
+    const r = await run({ adapter, prompt: "x", streaming: true, onEvent: (e) => e.type === "text_delta" && arrivals.push(Date.now()) });
+    assert.equal(r.finalText, "one two three");
+    assert.equal(arrivals.length, 3);
+    // Streaming means text is in hand before the server has finished sending, not all at once at the end.
+    assert.ok(arrivals[0] < lastSentAt, `first delta arrived ${arrivals[0] - lastSentAt}ms relative to the last chunk being sent`);
+  } finally { server.close(); server.closeAllConnections?.(); }
+});

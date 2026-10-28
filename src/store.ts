@@ -3,8 +3,10 @@ import type { RunOptions, RunResult } from "./agent.js";
 import { run } from "./agent.js";
 import { lockStore } from "./lock.js";
 import { appendUser } from "./messages.js";
+import { trimHistory, withSummary } from "./history.js";
 
 export type { Store } from "./types.js";
+export { trimHistory } from "./history.js";
 
 export function memoryStore(): Store {
   const data = new Map<string, string>();
@@ -31,17 +33,75 @@ export function memoryStore(): Store {
  * from nanoharness-fs) extends that to other processes sharing it; otherwise it holds within one process,
  * for stores that are the same object.
  */
-export function session(store: Store, id: string) {
+export interface SessionOptions {
+  /** Keep at most this many messages (cut at a safe point) before each run, so a long conversation stays bounded. */
+  maxMessages?: number;
+  /** Turns the messages that are about to be dropped into a short summary that is kept instead. Needs `maxMessages`. */
+  summarize?: (dropped: Message[]) => string | Promise<string>;
+}
+
+export function session(store: Store, id: string, sessionOpts: SessionOptions = {}) {
   const key = `session:${id}`;
   return {
     messages: async (): Promise<Message[]> => (await store.get<Message[]>(key)) ?? [],
     clear: (): Promise<void> => lockStore(store, key, () => store.delete(key)),
     run: (opts: Omit<RunOptions, "prompt"> & { prompt: string }): Promise<RunResult> =>
       lockStore(store, key, async () => {
-        const history = (await store.get<Message[]>(key)) ?? [];
+        let history = (await store.get<Message[]>(key)) ?? [];
+        if (sessionOpts.maxMessages !== undefined && history.length > sessionOpts.maxMessages) {
+          const kept = trimHistory(history, { maxMessages: sessionOpts.maxMessages });
+          const dropped = history.slice(0, history.length - kept.length);
+          history = sessionOpts.summarize && dropped.length > 0 ? withSummary(kept, await sessionOpts.summarize(dropped)) : kept;
+        }
         const result = await run({ ...opts, prompt: appendUser(history, opts.prompt) });
         await store.set(key, result.messages);
         return result;
       }),
   };
+}
+
+/**
+ * Checks that a store you wrote (for Redis, Postgres, ...) behaves the way nanoharness expects. It writes and
+ * deletes keys under `prefix`. Returns a list of problems; an empty list means it passed.
+ */
+export async function checkStore(store: Store, prefix = "nanoharness-check:"): Promise<string[]> {
+  const problems: string[] = [];
+  const k = (s: string) => prefix + s;
+  const value = { text: "héllo 😀", n: 1.5, list: [1, null, true], nested: { a: [{ b: "c" }] } };
+  try {
+    if ((await store.get(k("missing"))) !== undefined) problems.push("get() of a missing key should return undefined");
+    await store.set(k("a"), value);
+    const back = await store.get(k("a"));
+    if (JSON.stringify(back) !== JSON.stringify(value)) problems.push("get() did not return what set() stored (JSON values must round-trip)");
+    await store.set(k("a"), "overwritten");
+    if ((await store.get(k("a"))) !== "overwritten") problems.push("set() should overwrite an existing key");
+    await store.set(k("b"), 0);
+    if ((await store.get(k("b"))) !== 0) problems.push("falsy values such as 0 must be stored");
+    await store.set(k("weird/key :%"), 1);
+    if ((await store.get(k("weird/key :%"))) !== 1) problems.push("keys may contain any characters");
+    const keys = (await store.keys(prefix)).sort();
+    const want = [k("a"), k("b"), k("weird/key :%")].sort();
+    if (JSON.stringify(keys) !== JSON.stringify(want)) problems.push(`keys(prefix) returned ${JSON.stringify(keys)}, expected ${JSON.stringify(want)}`);
+    await store.delete(k("a"));
+    if ((await store.get(k("a"))) !== undefined) problems.push("delete() did not remove the key");
+    await store.delete(k("never-set")); // must not throw
+    if (store.lock) {
+      let active = 0;
+      let overlap = false;
+      const work = () =>
+        store.lock!(k("lock"), async () => {
+          active++;
+          if (active > 1) overlap = true;
+          await new Promise((r) => setTimeout(r, 10));
+          active--;
+        });
+      await Promise.all([work(), work(), work()]);
+      if (overlap) problems.push("lock() let two callers in at once");
+    }
+  } catch (e) {
+    problems.push(`threw: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    for (const key of [k("a"), k("b"), k("weird/key :%")]) await store.delete(key).catch(() => {});
+  }
+  return problems;
 }

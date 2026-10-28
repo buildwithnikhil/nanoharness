@@ -1,4 +1,5 @@
-import type { Adapter, AdapterResponse, AdapterStopReason, ContentBlock, Message, TextBlock, ToolUseBlock } from "nanoharness";
+import { AdapterError, readSSE } from "nanoharness";
+import type { Adapter, AdapterRequest, AdapterResponse, AdapterStopReason, ContentBlock, Message, TextBlock, ToolUseBlock, Usage } from "nanoharness";
 
 export interface OpenAIOptions {
   /** The model name, e.g. "gpt-4.1" or "llama3.1". Required because every server names models differently. */
@@ -15,8 +16,10 @@ export interface OpenAIOptions {
   temperature?: number;
   /** A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. */
   fetch?: typeof fetch;
-  /** Retries for 408, 429 and 5xx responses, with backoff. Default 2. */
+  /** Retries for 408, 429, 500, 502, 503 and 504 responses, with backoff. Default 2. */
   maxRetries?: number;
+  /** When streaming, ask the server for token usage in the last chunk (`stream_options.include_usage`). Turn off for servers that reject it. Default true. */
+  streamUsage?: boolean;
 }
 
 const RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
@@ -68,7 +71,7 @@ async function send(doFetch: typeof fetch, url: string, init: RequestInit): Prom
   } catch (e) {
     const cause = (e as { cause?: { message?: string } }).cause?.message ?? "";
     if (!init.signal?.aborted && /redirect/i.test(cause)) {
-      throw new Error("OpenAI API: the server answered with a redirect, which is never followed so your API key and conversation stay with baseUrl", { cause: e });
+      throw new AdapterError("OpenAI API: the server answered with a redirect, which is never followed so your API key and conversation stay with baseUrl", { cause: e, retryable: false });
     }
     throw e;
   }
@@ -140,40 +143,81 @@ function toOpenAIMessages(system: string | undefined, messages: Message[]): Open
   return out;
 }
 
+// Builds the harness response from text and tool calls, the same way for a whole reply and a streamed one.
+function assemble(text: string, calls: Array<{ id: string; name: string; args: string }>, finish: string | undefined, usage?: Usage): AdapterResponse {
+  const content: Array<TextBlock | ToolUseBlock> = [];
+  if (text) content.push({ type: "text", text });
+  for (const tc of calls) {
+    let input: Record<string, unknown> = {};
+    let error: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(tc.args || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+      else error = "arguments must be a JSON object";
+    } catch {
+      error = "arguments were not valid JSON";
+    }
+    // A malformed call is flagged, not run with an empty input: the harness reports it to the model instead.
+    content.push({ type: "tool_use", id: tc.id, name: tc.name, input, ...(error ? { error } : {}) });
+  }
+  return {
+    content,
+    // "length" wins over tool calls: arguments cut off by the token limit are incomplete and must not run.
+    stopReason:
+      finish === "length"
+        ? "max_tokens"
+        : content.some((b) => b.type === "tool_use")
+          ? "tool_use"
+          : (STOP[finish ?? ""] ?? "other"),
+    ...(usage ? { usage } : {}),
+  };
+}
+
 export function openai(opts: OpenAIOptions): Adapter {
   if (!opts.model) throw new Error("openai(): model is required");
   const doFetch = opts.fetch ?? fetch;
   const url = chatUrl(opts.baseUrl ?? "https://api.openai.com/v1", opts.allowInsecureHttp ?? false);
   const maxRetries = opts.maxRetries ?? 2;
 
+  const body = (req: AdapterRequest, stream: boolean) =>
+    JSON.stringify({
+      model: opts.model,
+      messages: toOpenAIMessages(req.system, req.messages),
+      ...(opts.maxTokens !== undefined ? { [opts.maxTokensParam ?? "max_tokens"]: opts.maxTokens } : {}),
+      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+      ...(req.tools.length
+        ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } })) }
+        : {}),
+      ...(stream ? { stream: true, ...(opts.streamUsage !== false ? { stream_options: { include_usage: true } } : {}) } : {}),
+    });
+
+  // Sends the request, retrying rate limits and server errors; a final failure is an AdapterError with the status.
+  async function request(payload: string, signal?: AbortSignal): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      const res = await send(doFetch, url, {
+        method: "POST",
+        signal,
+        // Never follow a redirect: the request carries your API key and the whole conversation.
+        redirect: "error",
+        headers: { "content-type": "application/json", ...(opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}) },
+        body: payload,
+      });
+      if (res.ok) return res;
+      const retryAfterMs = Math.min(retryDelayMs(res.headers.get("retry-after"), attempt), 30_000);
+      if (!RETRYABLE.has(res.status) || attempt >= maxRetries) {
+        throw new AdapterError(`OpenAI API error ${res.status}: ${await errorBody(res)}`, {
+          status: res.status,
+          ...(res.headers.has("retry-after") ? { retryAfterMs } : {}),
+        });
+      }
+      await res.body?.cancel().catch(() => {}); // free the connection before waiting
+      await sleep(retryAfterMs, signal);
+    }
+  }
+
   return {
     async complete(req): Promise<AdapterResponse> {
-      const body = JSON.stringify({
-        model: opts.model,
-        messages: toOpenAIMessages(req.system, req.messages),
-        ...(opts.maxTokens !== undefined ? { [opts.maxTokensParam ?? "max_tokens"]: opts.maxTokens } : {}),
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-        ...(req.tools.length
-          ? { tools: req.tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input_schema } })) }
-          : {}),
-      });
-
-      let res: Response;
-      for (let attempt = 0; ; attempt++) {
-        res = await send(doFetch, url, {
-          method: "POST",
-          signal: req.signal,
-          // Never follow a redirect: the request carries your API key and the whole conversation.
-          redirect: "error",
-          headers: { "content-type": "application/json", ...(opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}) },
-          body,
-        });
-        if (res.ok || !RETRYABLE.has(res.status) || attempt >= maxRetries) break;
-        await res.body?.cancel().catch(() => {}); // free the connection before waiting
-        await sleep(Math.min(retryDelayMs(res.headers.get("retry-after"), attempt), 30_000), req.signal);
-      }
-      if (!res.ok) throw new Error(`OpenAI API error ${res.status}: ${await errorBody(res)}`);
-
+      const res = await request(body(req, false), req.signal);
       let data: {
         choices?: { message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }; finish_reason?: string }[];
         usage?: { prompt_tokens: number; completion_tokens: number };
@@ -181,38 +225,60 @@ export function openai(opts: OpenAIOptions): Adapter {
       try {
         data = (await res.json()) as typeof data;
       } catch {
-        throw new Error("OpenAI API returned invalid JSON");
+        throw new AdapterError("OpenAI API returned invalid JSON");
       }
       const choice = data.choices?.[0];
-      if (!choice?.message) throw new Error("OpenAI API returned no choices");
+      if (!choice?.message) throw new AdapterError("OpenAI API returned no choices");
+      const calls = (choice.message.tool_calls ?? []).map((tc) => ({ id: tc.id, name: tc.function.name, args: tc.function.arguments }));
+      return assemble(
+        choice.message.content ?? "",
+        calls,
+        choice.finish_reason,
+        data.usage && { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens },
+      );
+    },
 
-      const content: Array<TextBlock | ToolUseBlock> = [];
-      if (choice.message.content) content.push({ type: "text", text: choice.message.content });
-      for (const tc of choice.message.tool_calls ?? []) {
-        let input: Record<string, unknown> = {};
-        let error: string | undefined;
-        try {
-          const parsed: unknown = JSON.parse(tc.function.arguments || "{}");
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
-          else error = "arguments must be a JSON object";
-        } catch {
-          error = "arguments were not valid JSON";
+    async *stream(req) {
+      const res = await request(body(req, true), req.signal);
+      if (!res.body) throw new AdapterError("OpenAI API returned an empty stream");
+      let text = "";
+      let finish: string | undefined;
+      let usage: Usage | undefined;
+      let done = false;
+      const calls: Array<{ id: string; name: string; args: string }> = [];
+      for await (const { data } of readSSE(res.body)) {
+        if (data === "[DONE]") {
+          done = true;
+          break;
         }
-        // A malformed call is flagged, not run with an empty input: the harness reports it to the model instead.
-        content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input, ...(error ? { error } : {}) });
+        let chunk: {
+          choices?: { delta?: { content?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
+          usage?: { prompt_tokens: number; completion_tokens: number } | null;
+          error?: { message?: string };
+        };
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          throw new AdapterError("OpenAI API sent an invalid stream chunk");
+        }
+        if (chunk.error) throw new AdapterError(`OpenAI API stream error: ${chunk.error.message ?? "unknown"}`);
+        if (chunk.usage) usage = { inputTokens: chunk.usage.prompt_tokens, outputTokens: chunk.usage.completion_tokens };
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
+        if (choice.delta?.content) {
+          text += choice.delta.content;
+          yield { type: "text_delta", text: choice.delta.content };
+        }
+        for (const tc of choice.delta?.tool_calls ?? []) {
+          const c = (calls[tc.index ?? 0] ??= { id: "", name: "", args: "" });
+          if (tc.id) c.id = tc.id;
+          if (tc.function?.name && !c.name) c.name = tc.function.name;
+          c.args += tc.function?.arguments ?? "";
+        }
+        if (choice.finish_reason) finish = choice.finish_reason;
       }
-
-      return {
-        content,
-        // "length" wins over tool calls: arguments cut off by the token limit are incomplete and must not run.
-        stopReason:
-          choice.finish_reason === "length"
-            ? "max_tokens"
-            : content.some((b) => b.type === "tool_use")
-              ? "tool_use"
-              : (STOP[choice.finish_reason ?? ""] ?? "other"),
-        usage: data.usage && { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens },
-      };
+      if (!done && finish === undefined) throw new AdapterError("OpenAI API stream ended early", { retryable: false });
+      yield { type: "response", response: assemble(text, calls.filter(Boolean), finish, usage) };
     },
   };
 }

@@ -1,6 +1,6 @@
 {
   "name": "nanoharness",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Zero-dependency, provider-agnostic agent harness: tool loop, guardrails, multi-agent orchestration, workflow graphs and sessions. No network or filesystem code in the core.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -73,7 +73,7 @@
     "typecheck": "tsc --noEmit",
     "test": "npm run build && npm run test:run",
     "prepublishOnly": "npm run typecheck && npm test",
-    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/review.test.mjs test/hardening.test.mjs test/cjs.test.cjs",
+    "test:run": "node --test test/agent.test.mjs test/guardrails.test.mjs test/orchestration.test.mjs test/audit.test.mjs test/review.test.mjs test/hardening.test.mjs test/features.test.mjs test/cjs.test.cjs",
     "test:all": "npm run build:all && npm run test:run:all",
     "test:run:all": "npm run test:run && npm run test:run --workspaces",
     "build:all": "npm run build && npm run build --workspaces",
