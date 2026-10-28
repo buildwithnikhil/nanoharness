@@ -2,7 +2,7 @@
 
 All notable changes are listed here. This project follows [semantic versioning](https://semver.org). The companion packages (`nanoharness-anthropic`, `nanoharness-openai`, `nanoharness-fs`) are versioned on their own and are listed under the core release they first shipped with.
 
-## 2.0.0 (unreleased)
+## 2.0.0 (2026-10-28)
 
 The core package no longer contains any network or filesystem code. The Anthropic adapter and the file tools moved into companion packages, so `nanoharness` itself has no `fetch`, no `fs` and no URLs. This is a breaking release.
 
