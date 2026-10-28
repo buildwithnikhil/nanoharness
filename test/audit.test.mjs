@@ -1,12 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fsp from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { run, defineTool, anthropic } from "../dist/index.js";
+import { run, defineTool } from "../dist/index.js";
 import { defineAgent, pipeline, parallel } from "../dist/agents.js";
-import { fileStore, memoryStore, session } from "../dist/store.js";
-import { createFsTools } from "../dist/tools-fs.js";
+import { memoryStore, session } from "../dist/store.js";
 
 const text = (t, usage) => ({ content: [{ type: "text", text: t }], stopReason: "end_turn", usage });
 const calls = (...c) => ({
@@ -39,13 +35,6 @@ test("A1: caller signal and agent signal are both honoured", async () => {
   await sleep(10);
   caller.abort();
   assert.equal((await p).stopReason, "aborted");
-});
-
-test("A2: concurrent writes to one fileStore key all succeed", async () => {
-  const s = fileStore(await fsp.mkdtemp(path.join(os.tmpdir(), "nh-conc-")));
-  await Promise.all(Array.from({ length: 200 }, (_, i) => s.set("k", { i })));
-  assert.equal(typeof (await s.get("k")).i, "number");
-  assert.deepEqual(await s.keys(), ["k"]);
 });
 
 test("A3: concurrent session runs on one id are queued and keep every message", async () => {
@@ -206,42 +195,3 @@ test("A8: invalid agent names are rejected", () => {
   defineAgent({ name: "ok_name-1", adapter: scripted() });
 });
 
-test("anthropic adapter retries 429 honouring retry-after, and gives up after maxRetries", async () => {
-  let n = 0;
-  const mk = (maxRetries) => anthropic({
-    apiKey: "k", maxRetries,
-    fetch: async () => {
-      n++;
-      return n < 3 ? new Response("slow down", { status: 429, headers: { "retry-after": "0.01" } })
-        : new Response(JSON.stringify({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }));
-    },
-  });
-  assert.equal((await run({ adapter: mk(2), prompt: "x" })).finalText, "ok");
-  assert.equal(n, 3);
-  n = 0;
-  await assert.rejects(run({ adapter: mk(1), prompt: "x" }), /429: slow down/);
-  assert.equal(n, 2);
-});
-
-test("anthropic adapter does not retry 4xx client errors and aborts during backoff", async () => {
-  let n = 0;
-  const bad = anthropic({ apiKey: "k", fetch: async () => (n++, new Response("no", { status: 401 })) });
-  await assert.rejects(run({ adapter: bad, prompt: "x" }), /401/);
-  assert.equal(n, 1);
-  const ctl = new AbortController();
-  const slow = anthropic({ apiKey: "k", fetch: async () => new Response("x", { status: 503, headers: { "retry-after": "20" } }) });
-  const p = run({ adapter: slow, prompt: "x", signal: ctl.signal });
-  setTimeout(() => ctl.abort(), 30);
-  const t0 = Date.now();
-  assert.equal((await p).stopReason, "aborted");
-  assert.ok(Date.now() - t0 < 1000);
-});
-
-test("read_file refuses files over maxFileBytes", async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "nh-big-"));
-  await fsp.writeFile(path.join(dir, "big.txt"), "x".repeat(100));
-  await fsp.writeFile(path.join(dir, "small.txt"), "ok");
-  const read = createFsTools({ root: dir, maxFileBytes: 50 }).find((t) => t.name === "read_file");
-  await assert.rejects(read.run({ path: "big.txt" }, {}), /File too large: 100 bytes \(limit 50\)/);
-  assert.equal(await read.run({ path: "small.txt" }, {}), "ok");
-});

@@ -1,12 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fsp from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { defineTool } from "../dist/index.js";
 import { defineAgent, pipeline, parallel, createPlanTool } from "../dist/agents.js";
 import { createGraph, END } from "../dist/graph.js";
-import { memoryStore, fileStore, session } from "../dist/store.js";
+import { memoryStore, session } from "../dist/store.js";
 
 const text = (t) => ({ content: [{ type: "text", text: t }], stopReason: "end_turn" });
 const call = (id, name, input = {}) => ({
@@ -114,12 +111,9 @@ test("plan tool rejects an invalid status", async () => {
   assert.equal(adapter.requests[1].messages.at(-1).content[0].is_error, true);
 });
 
-for (const [label, make] of [
-  ["memoryStore", async () => memoryStore()],
-  ["fileStore", async () => fileStore(await fsp.mkdtemp(path.join(os.tmpdir(), "nh-store-")))],
-]) {
-  test(`${label}: get/set/delete/keys round-trip`, async () => {
-    const s = await make();
+{
+  test("memoryStore: get/set/delete/keys round-trip", async () => {
+    const s = memoryStore();
     assert.equal(await s.get("missing"), undefined);
     await s.set("a/b", { n: 1 });
     await s.set("a:c", [1, 2]);
@@ -132,24 +126,16 @@ for (const [label, make] of [
   });
 }
 
-test("fileStore keys cannot escape the directory", async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "nh-esc-"));
-  const s = fileStore(path.join(dir, "store"));
-  await s.set("../../evil", "x");
-  assert.deepEqual(await fsp.readdir(dir), ["store"]);
-  assert.equal(await s.get("../../evil"), "x");
-});
-
-test("session persists the conversation across runs and store instances", async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "nh-sess-"));
+test("session persists the conversation across runs", async () => {
+  const store = memoryStore();
   const a1 = fake(text("hello Ada"));
-  await session(fileStore(dir), "u1").run({ adapter: a1, prompt: "I am Ada" });
+  await session(store, "u1").run({ adapter: a1, prompt: "I am Ada" });
   const a2 = fake(text("you are Ada"));
-  const r = await session(fileStore(dir), "u1").run({ adapter: a2, prompt: "who am I?" });
+  const r = await session(store, "u1").run({ adapter: a2, prompt: "who am I?" });
   assert.deepEqual(a2.requests[0].messages.map((m) => m.content), ["I am Ada", [{ type: "text", text: "hello Ada" }], "who am I?"]);
   assert.equal(r.messages.length, 4);
-  await session(fileStore(dir), "u1").clear();
-  assert.deepEqual(await session(fileStore(dir), "u1").messages(), []);
+  await session(store, "u1").clear();
+  assert.deepEqual(await session(store, "u1").messages(), []);
 });
 
 test("session merges a new prompt after a run that stopped on tool results", async () => {

@@ -1,7 +1,7 @@
 import { promises as fs, realpathSync } from "node:fs";
 import path from "node:path";
-import { defineTool } from "./tool.js";
-import type { Tool } from "./tool.js";
+import { defineTool } from "nanoharness";
+import type { Store, Tool } from "nanoharness";
 
 export interface FsToolsOptions {
   /** Every path the model passes is resolved inside this directory. */
@@ -80,4 +80,44 @@ export function createFsTools(opts: FsToolsOptions): Tool[] {
   }
 
   return tools;
+}
+
+let tmpCounter = 0;
+
+/** One JSON file per key under `dir`. Writes are atomic (temp file then rename). */
+export function fileStore(dir: string): Store {
+  const file = (key: string) => path.join(dir, `${encodeURIComponent(key)}.json`);
+  return {
+    async get<T>(key: string) {
+      try {
+        return JSON.parse(await fs.readFile(file(key), "utf8")) as T;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw e;
+      }
+    },
+    async set(key, value) {
+      await fs.mkdir(dir, { recursive: true });
+      const target = file(key);
+      const tmp = `${target}.${process.pid}.${tmpCounter++}.${Math.random().toString(36).slice(2)}.tmp`;
+      await fs.writeFile(tmp, JSON.stringify(value));
+      await fs.rename(tmp, target);
+    },
+    async delete(key) {
+      await fs.rm(file(key), { force: true });
+    },
+    async keys(prefix = "") {
+      let names: string[];
+      try {
+        names = await fs.readdir(dir);
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw e;
+      }
+      return names
+        .filter((n) => n.endsWith(".json"))
+        .map((n) => decodeURIComponent(n.slice(0, -5)))
+        .filter((k) => k.startsWith(prefix));
+    },
+  };
 }

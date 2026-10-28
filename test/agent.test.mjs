@@ -1,10 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import fsp from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { run, stream, defineTool, anthropic } from "../dist/index.js";
-import { createFsTools } from "../dist/tools-fs.js";
+import { run, stream, defineTool } from "../dist/index.js";
 import { defineZodTool } from "../dist/zod.js";
 import { z } from "zod";
 
@@ -117,54 +113,3 @@ test("zod tool validates and runs", async () => {
   assert.equal(adapter.requests[2].messages.at(-1).content[0].content, "hi Ada");
 });
 
-test("fs tools stay inside root and write is opt-in", async () => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "nano-"));
-  await fsp.writeFile(path.join(dir, "a.txt"), "hello");
-  await fsp.symlink(os.tmpdir(), path.join(dir, "link"));
-
-  const ro = createFsTools({ root: dir });
-  assert.deepEqual(ro.map((t) => t.name), ["read_file", "list_dir"]);
-  const read = ro.find((t) => t.name === "read_file");
-  assert.equal(await read.run({ path: "a.txt" }, {}), "hello");
-  await assert.rejects(read.run({ path: "../x" }, {}), /escapes root/);
-  await assert.rejects(read.run({ path: "link/anything" }, {}), /escapes root/);
-
-  const rw = createFsTools({ root: dir, allowWrite: true });
-  const write = rw.find((t) => t.name === "write_file");
-  await write.run({ path: "sub/b.txt", content: "x" }, {});
-  assert.equal(await fsp.readFile(path.join(dir, "sub/b.txt"), "utf8"), "x");
-  await assert.rejects(async () => write.run({ path: "../evil", content: "x" }, {}), /escapes root/);
-});
-
-test("anthropic adapter maps request and response", async () => {
-  let sent;
-  const adapter = anthropic({
-    apiKey: "k",
-    fetch: async (url, init) => {
-      sent = { url, headers: init.headers, body: JSON.parse(init.body) };
-      return new Response(
-        JSON.stringify({
-          content: [{ type: "text", text: "hi" }, { type: "thinking" }],
-          stop_reason: "end_turn",
-          usage: { input_tokens: 3, output_tokens: 4 },
-        }),
-      );
-    },
-  });
-  const r = await run({ adapter, prompt: "yo", system: "sys" });
-  assert.equal(sent.url, "https://api.anthropic.com/v1/messages");
-  assert.equal(sent.headers["x-api-key"], "k");
-  assert.equal(sent.body.system, "sys");
-  assert.equal(r.finalText, "hi");
-  assert.deepEqual(r.usage, { inputTokens: 3, outputTokens: 4 });
-});
-
-test("anthropic adapter surfaces HTTP errors", async () => {
-  const adapter = anthropic({ apiKey: "k", fetch: async () => new Response("bad key", { status: 401 }) });
-  await assert.rejects(run({ adapter, prompt: "x" }), /401: bad key/);
-});
-
-test("live call (needs ANTHROPIC_API_KEY)", { skip: !process.env.ANTHROPIC_API_KEY }, async () => {
-  const r = await run({ adapter: anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }), prompt: "Say hi in one word." });
-  assert.ok(r.finalText.length > 0);
-});

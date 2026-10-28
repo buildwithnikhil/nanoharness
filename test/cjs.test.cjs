@@ -1,14 +1,13 @@
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
 const { run, defineTool, allowTools } = require("nanoharness");
-const { createFsTools } = require("nanoharness/tools-fs");
 const { defineZodTool } = require("nanoharness/zod");
 const { defineAgent, pipeline, parallel, createPlanTool } = require("nanoharness/agents");
 const { createGraph, END } = require("nanoharness/graph");
-const { memoryStore, fileStore, session } = require("nanoharness/store");
+const { memoryStore, session } = require("nanoharness/store");
 
 test("CJS build loads all entry points and runs", async () => {
-  for (const f of [createFsTools, defineZodTool, pipeline, parallel, createPlanTool, createGraph, memoryStore, fileStore, session, allowTools]) {
+  for (const f of [defineZodTool, pipeline, parallel, createPlanTool, createGraph, memoryStore, session, allowTools]) {
     assert.equal(typeof f, "function");
   }
   assert.equal(END, "__end__");

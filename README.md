@@ -2,20 +2,28 @@
 
 A lightweight, zero-dependency agent harness for small apps. You give it a model adapter and some tools. It runs the tool-use loop.
 
-- **Zero runtime dependencies.** The Anthropic adapter uses `fetch`.
-- **Provider-agnostic.** A model provider is one method: `complete(request) → response`.
-- **Bring your own tools.** There are no built-in tools and no shell access. An optional, sandboxed file tool set is available at `nanoharness/tools-fs`.
-- **Scales up when you need it.** Multi-agent orchestration, planning, workflow graphs and persistence are opt-in subpath imports (`nanoharness/agents`, `/graph`, `/store`). Apps that don't import them don't pay for them.
+- **Zero runtime dependencies, and no network or filesystem code in the core.** Talking to a model or to disk lives in small companion packages you opt into.
+- **Provider-agnostic.** A model provider is one method: `complete(request) → response`. Adapters for Anthropic and for OpenAI-compatible servers are published separately.
+- **Bring your own tools.** There are no built-in tools and no shell access. Sandboxed file tools are an optional companion package.
+- **Scales up when you need it.** Multi-agent orchestration, planning, workflow graphs and sessions are opt-in subpath imports (`nanoharness/agents`, `/graph`, `/store`). Apps that don't import them don't pay for them.
 - **ESM and CJS**, with types. Node 18 or later.
 
+| Package | What it is |
+|---|---|
+| `nanoharness` | The loop, tools, guardrails, agents, graphs, in-memory store and sessions. |
+| [`nanoharness-anthropic`](packages/anthropic) | Adapter for Claude. |
+| [`nanoharness-openai`](packages/openai) | Adapter for OpenAI and any OpenAI-compatible server (Ollama, vLLM, OpenRouter, LM Studio, Groq, ...). |
+| [`nanoharness-fs`](packages/fs) | Sandboxed `read_file` / `list_dir` / `write_file` tools and a file-backed store. |
+
 ```sh
-npm install nanoharness
+npm install nanoharness nanoharness-anthropic   # or nanoharness-openai
 ```
 
 ## Quickstart
 
 ```ts
-import { run, defineTool, anthropic } from "nanoharness";
+import { run, defineTool } from "nanoharness";
+import { anthropic } from "nanoharness-anthropic";
 
 const add = defineTool<{ a: number; b: number }>({
   name: "add",
@@ -35,6 +43,8 @@ const { finalText } = await run({
 });
 console.log(finalText);
 ```
+
+Examples you can run are in [`examples/`](examples).
 
 ## Multi-agent, workflows and persistence
 
@@ -64,6 +74,8 @@ const { finalText } = await pipeline([researcher, writer], "Node 24");
 // 3. Parallel: run agents concurrently with a limit. Failures are reported per agent.
 const results = await parallel([researcher, researcher], ["Node 22", "Node 24"], { concurrency: 2 });
 ```
+
+`pipeline` and `parallel` accept `maxModelCalls` to share one budget across the agents they run, and `pipeline` also returns the total `usage`.
 
 A sub-agent that does not finish (turn limit, rejected by `evaluate`, aborted, out of budget) is reported to its caller as a tool error instead of a half answer. Each agent can have its own model adapter, tools, guardrails and `maxTurns`, so a cheap model can do the research while a stronger one writes.
 
@@ -114,9 +126,10 @@ Pass `store` and `id` and the graph saves a checkpoint after every node. If the 
 ### Persistence: `nanoharness/store`
 
 ```ts
-import { fileStore, memoryStore, session } from "nanoharness/store";
+import { memoryStore, session } from "nanoharness/store";
+import { fileStore } from "nanoharness-fs"; // keeps one JSON file per key, written atomically
 
-const store = fileStore("./.agent-data"); // one JSON file per key, written atomically
+const store = fileStore("./.agent-data"); // or memoryStore() for a process-lifetime store
 
 const chat = session(store, "user-42");
 await chat.run({ adapter, prompt: "I am Ada" });
@@ -125,7 +138,7 @@ await chat.run({ adapter, prompt: "Who am I?" }); // remembers, even after a res
 
 Runs on the same session id are queued in order as long as they share one `store` object. This does not protect against several processes writing the same id.
 
-A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `fileStore` and `memoryStore` are the only implementations shipped.
+A `Store` is four methods (`get`, `set`, `delete`, `keys`), so you can back it with Redis, SQLite or anything else in a few lines. `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. Sessions keep the whole history, so a long-lived session grows until you `clear()` it or trim it yourself.
 
 ## API
 
@@ -149,7 +162,7 @@ for await (const ev of stream({ adapter, prompt, tools })) {
 | `signal` | An `AbortSignal`. Stops with `stopReason: "aborted"`. |
 | `onToolCall` | `(call) => "allow" \| "deny" \| { deny: reason }`, called before each tool runs. |
 
-`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`.
+`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`. If the token limit cuts off a tool call halfway, the call is not run, that turn is dropped from `messages`, and `stopReason` is `max_tokens`, so you can retry with a larger limit.
 
 Errors from tools, from invalid model arguments, from unknown tool names and from `onToolCall` denials are returned to the model as `tool_result` blocks with `is_error: true`. Only adapter failures throw.
 
@@ -195,7 +208,7 @@ What this does not do: no prompt-injection defence is complete. Fencing untruste
 
 ### `defineTool({ name, description, schema, run })`
 
-`schema` is plain JSON Schema. Model arguments are checked against `type`, `required`, `properties`, `enum` and `items`. Other keywords are sent to the model but not enforced.
+`schema` is plain JSON Schema. Model arguments are checked against `type`, `enum`, `required`, `properties`, `additionalProperties: false`, `items`, `minimum` / `maximum`, `minLength` / `maxLength`, `pattern` and `minItems` / `maxItems`. Other keywords are sent to the model but not enforced. A failed check goes back to the model as an error so it can correct itself.
 
 ### Zod (optional)
 
@@ -213,14 +226,14 @@ const greet = defineZodTool({
 
 ### File tools (optional)
 
+The sandboxed file tools and `fileStore` live in [`nanoharness-fs`](packages/fs), so the core has no filesystem code.
+
 ```ts
-import { createFsTools } from "nanoharness/tools-fs";
+import { createFsTools } from "nanoharness-fs";
 
 const tools = createFsTools({ root: "./workspace" }); // read_file, list_dir
 // createFsTools({ root, allowWrite: true }) also adds write_file
 ```
-
-Paths are resolved inside `root`, and symlinks pointing outside it are rejected. `read_file` refuses files over `maxFileBytes` (default 1,000,000).
 
 ### Writing an adapter
 
@@ -233,13 +246,17 @@ const myAdapter: Adapter = {
 };
 ```
 
-The built-in Anthropic adapter retries rate limits and server errors (429, 5xx) with backoff, honouring `retry-after`; set `maxRetries` (default `2`). Custom adapters decide their own retry policy.
+The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), retry rate limits and server errors (429, 5xx) with backoff and refuse to send your API key over plain http to a remote host. A custom adapter decides its own retry policy.
 
-Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it.
+Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it, as `nanoharness-openai` does.
 
 ## Not included
 
-Token-level streaming, shell tools, automatic memory summarisation and context compaction, and a database-backed store. The event stream is additive, so token deltas can be added later without breaking the API.
+Token-level streaming, images and other non-text content, shell tools, automatic summarisation or trimming of long conversations, parallel branches inside a graph (use `parallel()` inside a node), and a database-backed store. The event stream is additive, so token deltas can be added later without breaking the API.
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). To report a vulnerability, see [SECURITY.md](SECURITY.md). Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

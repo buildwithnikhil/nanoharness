@@ -1,0 +1,68 @@
+{
+  "name": "nanoharness-openai",
+  "version": "1.0.0",
+  "description": "OpenAI-compatible chat model adapter for nanoharness: OpenAI, Ollama, vLLM, OpenRouter, LM Studio and more. Zero dependencies.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && npm run test:run",
+    "prepublishOnly": "npm run typecheck && npm test",
+    "test:run": "node --test test/openai.test.mjs"
+  },
+  "keywords": [
+    "nanoharness",
+    "openai",
+    "ollama",
+    "vllm",
+    "openrouter",
+    "adapter",
+    "llm"
+  ],
+  "license": "MIT",
+  "author": "buildwithnikhil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/buildwithnikhil/nanoharness.git",
+    "directory": "packages/openai"
+  },
+  "homepage": "https://github.com/buildwithnikhil/nanoharness/tree/main/packages/openai#readme",
+  "bugs": {
+    "url": "https://github.com/buildwithnikhil/nanoharness/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "peerDependencies": {
+    "nanoharness": ">=2.0.0 <3"
+  },
+  "devDependencies": {
+    "nanoharness": "file:../.."
+  }
+}
