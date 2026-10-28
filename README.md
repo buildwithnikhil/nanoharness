@@ -1,6 +1,6 @@
 # nanoharness
 
-A lightweight, zero-dependency agent harness for small apps. You give it a model adapter and some tools. It runs the tool-use loop.
+A lightweight, zero-dependency agent harness. You give it a model adapter and some tools. It runs the tool-use loop.
 
 - **Zero runtime dependencies, and no network or filesystem code in the core.** Talking to a model or to disk lives in small companion packages you opt into.
 - **Provider-agnostic.** A model provider is one method: `complete(request) → response`. Adapters for Anthropic and for OpenAI-compatible servers are published separately.

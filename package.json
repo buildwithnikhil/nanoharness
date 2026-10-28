@@ -1,7 +1,7 @@
 {
   "name": "nanoharness",
   "version": "2.0.0",
-  "description": "Zero-dependency, provider-agnostic agent harness for small apps: tool loop, guardrails, multi-agent orchestration, workflow graphs and sessions. No network or filesystem code in the core.",
+  "description": "Zero-dependency, provider-agnostic agent harness: tool loop, guardrails, multi-agent orchestration, workflow graphs and sessions. No network or filesystem code in the core.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
