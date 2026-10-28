@@ -246,6 +246,8 @@ const myAdapter: Adapter = {
 };
 ```
 
+If a provider returns a malformed tool call, set `error` on the `tool_use` block you return. The harness will not run it and will tell the model what was wrong. If the output was cut off by the token limit, return `stopReason: "max_tokens"` so truncated calls are not run.
+
 The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), retry rate limits and server errors (429, 5xx) with backoff and refuse to send your API key over plain http to a remote host. A custom adapter decides its own retry policy.
 
 Messages and content blocks use the Anthropic shape (`text`, `tool_use`, `tool_result`). Adapters for other providers translate to and from it, as `nanoharness-openai` does.

@@ -55,6 +55,34 @@ test("temperature is sent only when set", async () => {
   assert.equal(bodies[1].temperature, 0);
 });
 
+test("only API-defined fields are sent for tool_use blocks", async () => {
+  let body;
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => ((body = JSON.parse(init.body)), new Response(okBody())) });
+  await adapter.complete({
+    tools: [],
+    messages: [
+      { role: "user", content: "x" },
+      { role: "assistant", content: [{ type: "text", text: "t" }, { type: "tool_use", id: "1", name: "n", input: { a: 1 }, error: "internal flag" }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "1", content: "r", is_error: true }] },
+    ],
+  });
+  assert.deepEqual(body.messages[1].content[1], { type: "tool_use", id: "1", name: "n", input: { a: 1 } });
+  assert.deepEqual(body.messages[2].content[0], { type: "tool_result", tool_use_id: "1", content: "r", is_error: true });
+});
+
+test("retried responses are cancelled so connections are freed", async () => {
+  let cancelled = 0, n = 0;
+  const limited = () => {
+    const r = new Response("slow", { status: 429, headers: { "retry-after": "0.001" } });
+    const c = r.body.cancel.bind(r.body);
+    r.body.cancel = (...a) => (cancelled++, c(...a));
+    return r;
+  };
+  const adapter = anthropic({ apiKey: "k", fetch: async () => (++n < 3 ? limited() : new Response(okBody("ok"))) });
+  assert.equal((await run({ adapter, prompt: "x" })).finalText, "ok");
+  assert.equal(cancelled, 2);
+});
+
 test("surfaces HTTP errors", async () => {
   const adapter = anthropic({ apiKey: "k", fetch: async () => new Response("bad key", { status: 401 }) });
   await assert.rejects(run({ adapter, prompt: "x" }), /401: bad key/);

@@ -8,6 +8,8 @@ export interface ToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
+  /** Set by an adapter when the provider's tool call was malformed. The tool is not run and the model is told. */
+  error?: string;
 }
 
 export interface ToolResultBlock {

@@ -66,14 +66,43 @@ test("tool errors are labelled, and a tool result plus follow-up text is split i
   ]);
 });
 
-test("finish_reason mapping, and unparseable tool arguments become an empty input", async () => {
+test("finish_reason mapping", async () => {
   const mk = (message, finish) => openai({ model: "m", fetch: async () => reply(message, finish) });
   const complete = (a) => a.complete({ messages: [{ role: "user", content: "x" }], tools: [] });
   assert.equal((await complete(mk({ content: "a" }, "length"))).stopReason, "max_tokens");
   assert.equal((await complete(mk({ content: "a" }, "content_filter"))).stopReason, "other");
-  const bad = await complete(mk({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: "{not json" } }] }, "tool_calls"));
-  assert.deepEqual(bad.content, [{ type: "tool_use", id: "1", name: "t", input: {} }]);
-  assert.equal(bad.stopReason, "tool_use");
+  assert.equal((await complete(mk({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: "{}" } }] }, "tool_calls"))).stopReason, "tool_use");
+});
+
+test("a tool call cut off by the token limit is not run, even though it has tool_calls", async () => {
+  let ran = 0;
+  const t = defineTool({ name: "t", description: "", schema: { type: "object" }, run: () => (ran++, "x") });
+  const adapter = openai({ model: "m", fetch: async () => reply({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: '{"path":"/etc/pa' } }] }, "length") });
+  const r = await run({ adapter, prompt: "x", tools: [t] });
+  assert.equal(ran, 0);
+  assert.equal(r.stopReason, "max_tokens");
+  assert.deepEqual(r.messages, [{ role: "user", content: "x" }]);
+});
+
+test("invalid tool arguments are flagged and reported to the model, not run as an empty input", async () => {
+  let ran = 0, n = 0;
+  const t = defineTool({ name: "t", description: "", schema: { type: "object" }, run: () => (ran++, "x") });
+  const sent = [];
+  const adapter = openai({
+    model: "m",
+    fetch: async (_, init) => (sent.push(JSON.parse(init.body)), n++ === 0
+      ? reply({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: "{not json" } }] }, "tool_calls")
+      : reply({ content: "recovered" })),
+  });
+  const r = await run({ adapter, prompt: "x", tools: [t] });
+  assert.equal(ran, 0);
+  assert.equal(r.finalText, "recovered");
+  assert.equal(sent[1].messages.at(-1).content, "Error: Invalid tool call: arguments were not valid JSON");
+  for (const args of ["[1,2]", '"str"', "5"]) {
+    const a = openai({ model: "m", fetch: async () => reply({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: args } }] }, "tool_calls") });
+    const res = await a.complete({ messages: [{ role: "user", content: "x" }], tools: [] });
+    assert.equal(res.content[0].error, "arguments must be a JSON object", args);
+  }
 });
 
 test("no apiKey means no authorization header (local servers)", async () => {
