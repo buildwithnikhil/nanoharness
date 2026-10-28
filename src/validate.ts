@@ -1,5 +1,16 @@
 import type { JSONSchema } from "./types.js";
 
+const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
+
+// Unicode mode, so "." matches an emoji as one character; patterns that mode rejects fall back to plain mode.
+function regex(pattern: string): RegExp {
+  try {
+    return new RegExp(pattern, "u");
+  } catch {
+    return new RegExp(pattern);
+  }
+}
+
 function typeOf(v: unknown): string {
   if (v === null) return "null";
   if (Array.isArray(v)) return "array";
@@ -31,21 +42,23 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
     if (typeof schema.maximum === "number" && value > schema.maximum) return `${path}: must be <= ${schema.maximum}`;
   }
   if (typeof value === "string") {
-    if (typeof schema.minLength === "number" && value.length < schema.minLength) return `${path}: must be at least ${schema.minLength} characters`;
-    if (typeof schema.maxLength === "number" && value.length > schema.maxLength) return `${path}: must be at most ${schema.maxLength} characters`;
-    if (typeof schema.pattern === "string" && !new RegExp(schema.pattern).test(value)) return `${path}: must match ${schema.pattern}`;
+    // JSON Schema counts characters (code points), not UTF-16 units, so an emoji is one.
+    const length = [...value].length;
+    if (typeof schema.minLength === "number" && length < schema.minLength) return `${path}: must be at least ${schema.minLength} characters`;
+    if (typeof schema.maxLength === "number" && length > schema.maxLength) return `${path}: must be at most ${schema.maxLength} characters`;
+    if (typeof schema.pattern === "string" && !regex(schema.pattern).test(value)) return `${path}: must match ${schema.pattern}`;
   }
   if (typeOf(value) === "object") {
     const obj = value as Record<string, unknown>;
     if (schema.additionalProperties === false) {
-      const extra = Object.keys(obj).find((k) => !(k in (schema.properties ?? {})));
+      const extra = Object.keys(obj).find((k) => !has(schema.properties ?? {}, k));
       if (extra !== undefined) return `${path}.${extra}: not allowed`;
     }
     for (const key of schema.required ?? []) {
-      if (!(key in obj)) return `${path}.${key}: required`;
+      if (!has(obj, key)) return `${path}.${key}: required`;
     }
     for (const [key, sub] of Object.entries(schema.properties ?? {})) {
-      if (key in obj) {
+      if (has(obj, key)) {
         const err = validate(obj[key], sub, `${path}.${key}`);
         if (err) return err;
       }

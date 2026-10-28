@@ -120,6 +120,7 @@ async function dispatch(
   seen: Map<string, number>,
   base: ToolContext,
 ): Promise<string> {
+  if (call.error) throw new Error(`Invalid tool call: ${call.error}`);
   const tool = tools.get(call.name);
   if (!tool) throw new Error(`Unknown tool: ${call.name}`);
 
@@ -215,7 +216,8 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
       stopReason = "max_tokens";
       break;
     }
-    messages.push({ role: "assistant", content: res.content as ContentBlock[] });
+    // An empty reply is not stored: providers reject empty assistant messages when the history is replayed.
+    if (res.content.length > 0) messages.push({ role: "assistant", content: res.content as ContentBlock[] });
 
     const calls: ToolUseBlock[] = [];
     finalText = "";

@@ -33,6 +33,12 @@ Install what you use: `npm install nanoharness nanoharness-anthropic` (and `nano
 - A tool that returns a value JSON cannot encode (a function, for example) no longer crashes the run.
 - `defineZodTool` no longer sends the `$schema` marker to the model.
 - `createGraph` now throws if only one of `store` and `id` is given. Before, it silently turned checkpoints off.
+- **Schema checks could be bypassed by prototype-named keys.** A model-supplied `__proto__`, `constructor` or `toString` key slipped past `additionalProperties: false`, and an inherited property satisfied `required`. Checks now look at own properties only.
+- `minLength` / `maxLength` counted UTF-16 units, so an emoji counted as two characters. They now count characters, and `pattern` matches in Unicode mode (with a fallback for patterns that mode rejects).
+- An empty model reply no longer leaves an empty assistant message in the history, which providers reject when it is replayed.
+- Adapters can now flag a malformed tool call (`error` on a `tool_use` block). The harness does not run it and tells the model what was wrong.
+- The Anthropic adapter sends only the fields the API defines for `tool_use` blocks, and both adapters release the connection of a response they are about to retry.
+- **OpenAI adapter:** a tool call cut off by the token limit (`finish_reason: "length"`) and a call with invalid JSON arguments are no longer run with an empty input.
 
 ## 1.3.0 (2026-10-23)
 

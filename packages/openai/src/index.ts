@@ -120,6 +120,7 @@ export function openai(opts: OpenAIOptions): Adapter {
           body,
         });
         if (res.ok || !RETRYABLE.has(res.status) || attempt >= maxRetries) break;
+        await res.body?.cancel().catch(() => {}); // free the connection before waiting
         const retryAfter = Number(res.headers.get("retry-after"));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
         await sleep(Math.min(wait, 30_000), req.signal);
@@ -137,18 +138,27 @@ export function openai(opts: OpenAIOptions): Adapter {
       if (choice.message.content) content.push({ type: "text", text: choice.message.content });
       for (const tc of choice.message.tool_calls ?? []) {
         let input: Record<string, unknown> = {};
+        let error: string | undefined;
         try {
           const parsed: unknown = JSON.parse(tc.function.arguments || "{}");
           if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) input = parsed as Record<string, unknown>;
+          else error = "arguments must be a JSON object";
         } catch {
-          // Unparseable arguments become an empty input, so the tool's own schema check reports what is missing.
+          error = "arguments were not valid JSON";
         }
-        content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input });
+        // A malformed call is flagged, not run with an empty input: the harness reports it to the model instead.
+        content.push({ type: "tool_use", id: tc.id, name: tc.function.name, input, ...(error ? { error } : {}) });
       }
 
       return {
         content,
-        stopReason: content.some((b) => b.type === "tool_use") ? "tool_use" : (STOP[choice.finish_reason ?? ""] ?? "other"),
+        // "length" wins over tool calls: arguments cut off by the token limit are incomplete and must not run.
+        stopReason:
+          choice.finish_reason === "length"
+            ? "max_tokens"
+            : content.some((b) => b.type === "tool_use")
+              ? "tool_use"
+              : (STOP[choice.finish_reason ?? ""] ?? "other"),
         usage: data.usage && { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens },
       };
     },

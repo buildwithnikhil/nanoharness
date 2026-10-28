@@ -1,4 +1,4 @@
-import type { Adapter, AdapterResponse, AdapterStopReason, TextBlock, ToolUseBlock } from "nanoharness";
+import type { Adapter, AdapterResponse, AdapterStopReason, Message, TextBlock, ToolUseBlock } from "nanoharness";
 
 export interface AnthropicOptions {
   apiKey: string;
@@ -36,6 +36,15 @@ const STOP: Record<string, AdapterStopReason> = {
   max_tokens: "max_tokens",
 };
 
+// Send only the fields the API defines, so nothing an adapter or hook attached to a block reaches the provider.
+function cleanMessage(m: Message): Message {
+  if (typeof m.content === "string") return m;
+  return {
+    role: m.role,
+    content: m.content.map((b) => (b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: b.input } : b)),
+  };
+}
+
 function messagesUrl(baseUrl: string): string {
   let u: URL;
   try {
@@ -63,7 +72,7 @@ export function anthropic(opts: AnthropicOptions): Adapter {
         max_tokens: opts.maxTokens ?? 4096,
         ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
         system: req.system,
-        messages: req.messages,
+        messages: req.messages.map(cleanMessage),
         ...(req.tools.length ? { tools: req.tools } : {}),
       });
       const maxRetries = opts.maxRetries ?? 2;
@@ -80,6 +89,7 @@ export function anthropic(opts: AnthropicOptions): Adapter {
           body,
         });
         if (res.ok || !RETRYABLE.has(res.status) || attempt >= maxRetries) break;
+        await res.body?.cancel().catch(() => {}); // free the connection before waiting
         const retryAfter = Number(res.headers.get("retry-after"));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
         await sleep(Math.min(wait, 30_000), req.signal);

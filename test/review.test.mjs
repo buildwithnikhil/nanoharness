@@ -84,3 +84,51 @@ test("parallel shares one budget across its agents", async () => {
   const res = await parallel([mk("a"), mk("b"), mk("c")], "in", { concurrency: 1, maxModelCalls: 2 });
   assert.deepEqual(res.map((r) => r.value.stopReason), ["end_turn", "end_turn", "budget_exceeded"]);
 });
+
+test("schema checks cannot be bypassed with keys that exist on Object.prototype", () => {
+  const strict = { type: "object", additionalProperties: false, properties: { a: { type: "string" } } };
+  for (const key of ["__proto__", "constructor", "toString", "hasOwnProperty"]) {
+    const evil = JSON.parse(`{"a":"x","${key}":1}`);
+    assert.match(validate(evil, strict), /not allowed/, key);
+  }
+  assert.equal(validate({ a: "x" }, strict), null);
+  assert.match(validate({}, { type: "object", required: ["toString"] }), /toString: required/);
+  assert.equal(validate({ toString: "x" }, { type: "object", required: ["toString"] }), null);
+  // a property named like an inherited one is validated as its own value, not the inherited function
+  assert.match(validate({ toString: 1 }, { type: "object", properties: { toString: { type: "string" } } }), /expected string/);
+});
+
+test("an empty model reply is not stored, so the history can be replayed", async () => {
+  const r = await run({ adapter: scripted({ content: [], stopReason: "end_turn" }), prompt: "x" });
+  assert.deepEqual(r.messages, [{ role: "user", content: "x" }]);
+  assert.equal(r.finalText, "");
+  assert.equal(r.stopReason, "end_turn");
+});
+
+test("a tool call flagged by the adapter is not run and the model is told why", async () => {
+  let ran = 0;
+  const t = defineTool({ name: "t", description: "", schema: { type: "object" }, run: () => (ran++, "x") });
+  const reqs = [];
+  const adapter = {
+    complete: async (q) => (reqs.push(structuredClone({ ...q, signal: undefined })),
+      reqs.length === 1 ? { content: [{ type: "tool_use", id: "1", name: "t", input: {}, error: "arguments were not valid JSON" }], stopReason: "tool_use" } : text("ok")),
+  };
+  await run({ adapter, prompt: "x", tools: [t] });
+  assert.equal(ran, 0);
+  const res = reqs[1].messages.at(-1).content[0];
+  assert.equal(res.is_error, true);
+  assert.equal(res.content, "Invalid tool call: arguments were not valid JSON");
+});
+
+test("minLength and maxLength count characters, so an emoji is one", () => {
+  assert.match(validate("😀", { type: "string", minLength: 2 }), /at least 2 characters/);
+  assert.equal(validate("😀", { type: "string", maxLength: 1 }), null);
+  assert.equal(validate("a😀", { type: "string", minLength: 2, maxLength: 2 }), null);
+  assert.match(validate("😀😀", { type: "string", maxLength: 1 }), /at most 1 characters/);
+});
+
+test("pattern matches whole characters, and falls back for patterns unicode mode rejects", () => {
+  assert.equal(validate("😀", { type: "string", pattern: "^.$" }), null);
+  assert.match(validate("😀😀", { type: "string", pattern: "^.$" }), /must match/);
+  assert.equal(validate("a-b", { type: "string", pattern: "^a\\-b$" }), null, "an escape that is invalid in unicode mode still works");
+});
