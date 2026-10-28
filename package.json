@@ -77,7 +77,7 @@
     "test:all": "npm run build:all && npm run test:run:all",
     "test:run:all": "npm run test:run && npm run test:run --workspaces",
     "build:all": "npm run build && npm run build --workspaces",
-    "typecheck:all": "npm run typecheck && npm run typecheck --workspaces"
+    "typecheck:all": "npm run build && npm run typecheck && npm run typecheck --workspaces"
   },
   "keywords": [
     "agent",
