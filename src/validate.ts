@@ -3,6 +3,11 @@ import type { JSONSchema } from "./types.js";
 // Model-supplied keys such as "__proto__" or "toString" must not be mistaken for properties.
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k);
 
+// Deeper input than this is refused rather than risking a stack overflow.
+const MAX_DEPTH = 256;
+
+class TooDeep extends Error {}
+
 // Pattern matching on a very long string can stall the process, so long strings are refused up front.
 const MAX_PATTERN_INPUT = 100_000;
 
@@ -27,25 +32,27 @@ function matchesType(v: unknown, t: string): boolean {
 }
 
 /** Structural equality for JSON values. */
-export function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown, depth = 0): boolean {
+  if (depth > MAX_DEPTH) throw new TooDeep("value is nested too deeply");
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a)) {
     const other = b as unknown[];
-    return a.length === other.length && a.every((v, i) => deepEqual(v, other[i]));
+    return a.length === other.length && a.every((v, i) => deepEqual(v, other[i], depth + 1));
   }
   const ka = Object.keys(a);
   const kb = Object.keys(b);
-  return ka.length === kb.length && ka.every((k) => has(b, k) && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]));
+  return ka.length === kb.length && ka.every((k) => has(b, k) && deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k], depth + 1));
 }
 
 /** JSON text with object keys in sorted order, so equal values always give equal text. */
-export function canonical(v: unknown): string {
+export function canonical(v: unknown, depth = 0): string {
+  if (depth > MAX_DEPTH) throw new TooDeep("value is nested too deeply");
   if (v === null || typeof v !== "object") return JSON.stringify(v) ?? "undefined";
-  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (Array.isArray(v)) return `[${v.map((x) => canonical(x, depth + 1)).join(",")}]`;
   const o = v as Record<string, unknown>;
-  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(",")}}`;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k], depth + 1)}`).join(",")}}`;
 }
 
 const list = (v: unknown): JSONSchema[] => (Array.isArray(v) ? (v as JSONSchema[]) : []);
@@ -58,6 +65,16 @@ const list = (v: unknown): JSONSchema[] => (Array.isArray(v) ? (v as JSONSchema[
  * Returns an error message or null.
  */
 export function validate(value: unknown, schema: JSONSchema, path = "input"): string | null {
+  try {
+    return check(value, schema, path, 0);
+  } catch (e) {
+    if (e instanceof TooDeep) return `${path}: nested too deeply to check`;
+    throw e;
+  }
+}
+
+function check(value: unknown, schema: JSONSchema, path: string, depth: number): string | null {
+  if (depth > MAX_DEPTH) throw new TooDeep("schema or value is nested too deeply");
   if (schema.type !== undefined) {
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
     if (!types.some((t) => matchesType(value, t))) {
@@ -104,7 +121,7 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
     }
     for (const [key, sub] of Object.entries(props)) {
       if (has(obj, key)) {
-        const err = validate(obj[key], sub, `${path}.${key}`);
+        const err = check(obj[key], sub, `${path}.${key}`, depth + 1);
         if (err) return err;
       }
     }
@@ -115,7 +132,7 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
     } else if (extra && typeof extra === "object") {
       for (const key of Object.keys(obj)) {
         if (has(props, key)) continue;
-        const err = validate(obj[key], extra as JSONSchema, `${path}.${key}`);
+        const err = check(obj[key], extra as JSONSchema, `${path}.${key}`, depth + 1);
         if (err) return err;
       }
     }
@@ -126,20 +143,20 @@ export function validate(value: unknown, schema: JSONSchema, path = "input"): st
     if (schema.uniqueItems === true && new Set(value.map(canonical)).size !== value.length) return `${path}: items must be unique`;
     if (schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)) {
       for (let i = 0; i < value.length; i++) {
-        const err = validate(value[i], schema.items as JSONSchema, `${path}[${i}]`);
+        const err = check(value[i], schema.items as JSONSchema, `${path}[${i}]`, depth + 1);
         if (err) return err;
       }
     }
   }
   for (const sub of list(schema.allOf)) {
-    const err = validate(value, sub, path);
+    const err = check(value, sub, path, depth + 1);
     if (err) return err;
   }
   const anyOf = list(schema.anyOf);
-  if (anyOf.length > 0 && !anyOf.some((sub) => validate(value, sub, path) === null)) return `${path}: does not match any allowed schema`;
+  if (anyOf.length > 0 && !anyOf.some((sub) => check(value, sub, path, depth + 1) === null)) return `${path}: does not match any allowed schema`;
   const oneOf = list(schema.oneOf);
   if (oneOf.length > 0) {
-    const n = oneOf.filter((sub) => validate(value, sub, path) === null).length;
+    const n = oneOf.filter((sub) => check(value, sub, path, depth + 1) === null).length;
     if (n !== 1) return `${path}: must match exactly one allowed schema (matched ${n})`;
   }
   return null;

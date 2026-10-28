@@ -164,7 +164,7 @@ test("a redirect is never followed, so neither the key nor the conversation reac
     const { seen, base, close } = await redirectPair(status);
     try {
       const adapter = openai({ model: "m", apiKey: "SECRETKEY", baseUrl: base });
-      await assert.rejects(run({ adapter, prompt: "private conversation" }), /redirect|fetch failed/i, `status ${status}`);
+      await assert.rejects(run({ adapter, prompt: "private conversation" }), /redirect, which is never followed/, `status ${status}`);
       assert.equal(seen.length, 0, `status ${status}: the second server received a request`);
     } finally { close(); }
   }

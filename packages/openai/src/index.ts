@@ -42,8 +42,36 @@ function retryDelayMs(header: string | null, attempt: number): number {
 const ERROR_BODY_LIMIT = 1000;
 
 async function errorBody(res: Response): Promise<string> {
-  const text = await res.text().catch(() => "");
-  return text.length > ERROR_BODY_LIMIT ? `${text.slice(0, ERROR_BODY_LIMIT)}... [truncated ${text.length - ERROR_BODY_LIMIT} characters]` : text;
+  // Read only as much as is kept, so a huge error page is never buffered whole.
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (text.length <= ERROR_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    return text;
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  return `${text.slice(0, ERROR_BODY_LIMIT)}... [truncated]`;
+}
+
+// A redirect is refused (redirect: "error"), and the error says so instead of a bare "fetch failed".
+async function send(doFetch: typeof fetch, url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await doFetch(url, init);
+  } catch (e) {
+    const cause = (e as { cause?: { message?: string } }).cause?.message ?? "";
+    if (!init.signal?.aborted && /redirect/i.test(cause)) {
+      throw new Error("OpenAI API: the server answered with a redirect, which is never followed so your API key and conversation stay with baseUrl", { cause: e });
+    }
+    throw e;
+  }
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -132,7 +160,7 @@ export function openai(opts: OpenAIOptions): Adapter {
 
       let res: Response;
       for (let attempt = 0; ; attempt++) {
-        res = await doFetch(url, {
+        res = await send(doFetch, url, {
           method: "POST",
           signal: req.signal,
           // Never follow a redirect: the request carries your API key and the whole conversation.

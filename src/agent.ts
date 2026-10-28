@@ -187,6 +187,9 @@ async function dispatch(
     }
   }
 
+  // The run may have been aborted while onToolCall was deciding.
+  if (opts.signal?.aborted) throw new Error("Aborted before the tool could run.");
+
   let input: unknown = call.input;
   if (tool.parse) {
     const parsed = tool.parse(input);

@@ -50,6 +50,10 @@ export function defineAgent(config: AgentConfig): Agent {
   const exec = async (prompt: string | Message[], overrides: Partial<Omit<RunOptions, "prompt">> = {}) => {
     const defined = Object.fromEntries(Object.entries(overrides).filter(([, v]) => v !== undefined));
     const opts: RunOptions = { toolConcurrency: 4, maxModelCalls: 200, ...base, ...defined, prompt };
+    // When this agent runs as a sub-agent, report usage to its own onUsage as well as to the parent.
+    const own = base.onUsage;
+    const parent = defined.onUsage as RunOptions["onUsage"];
+    if (own && parent && own !== parent) opts.onUsage = (u) => (own(u), parent(u));
     // Keep the agent's own signal as well as the caller's.
     let dispose = () => {};
     if (base.signal && defined.signal) {

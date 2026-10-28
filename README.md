@@ -123,7 +123,7 @@ A node returns `{ state, next }`. `state` is merged into the shared state, and `
 
 Pass `store` and `id` and the graph saves a checkpoint after every node. If the process crashes, run it again with the same `id` and it resumes at the node that failed; `initial` is ignored when it resumes. A run that finishes (`done`) deletes its checkpoint. A run that stops on `max_steps` or `aborted` keeps it, so calling `run()` again continues where it stopped, and `{ fresh: true }` ignores the checkpoint and starts over. `maxSteps` limits the nodes one call may run, so a resumed call gets a fresh allowance.
 
-With a store, graph state is saved as JSON after every node, so it must be JSON-serialisable (a `Date` comes back as a string, and a key set to `undefined` disappears). A resumed run therefore sees the same state as an uninterrupted one. A node that returns a `next` that does not exist throws before anything is saved, and the checkpoint is saved before `onStep` is called. Runs with the same `id` are queued, not interleaved.
+With a store, graph state is saved as JSON after every node, so it must be JSON-serialisable (a `Date` comes back as a string, and a key set to `undefined` disappears). A resumed run therefore sees the same state as an uninterrupted one. A node that returns a `next` that does not exist throws before anything is saved, and the checkpoint is saved before `onStep` is called. Runs with the same `id` are queued, not interleaved, so a node must not call `run()` on its own graph id (it would wait for itself forever).
 
 ### Persistence: `nanoharness/store`
 

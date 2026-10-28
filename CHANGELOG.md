@@ -73,6 +73,15 @@ Four reviewers each read the code with a different focus and reported only bugs 
 - `Retry-After` is understood as an HTTP date as well as seconds. A 2xx body that is not JSON gives a clear error, and API error text is cut to 1,000 characters. Anthropic's `refusal` stop reason ends the turn. The OpenAI adapter leaves out an assistant message that has neither text nor tool calls.
 - `defineZodTool` shows the model the input schema (a field with a default is optional) and rejects a schema that is not a `z.object(...)` when the tool is defined.
 
+**Second pass (master review of the fixes above)**
+- `fileStore`: a key containing a lone surrogate shared a file with `"\uFFFD"` and made `get`/`delete` throw. Such keys are now stored under a hash.
+- `fileStore`: a key such as `con.foo` gave a name Windows treats as a device. The part before the first dot is now checked.
+- `fileStore` lock: a holder that stalled past `lockStaleMs` and lost the lock could delete the lock of whoever took over. Each holder now writes a token and removes the lock file only if it is still its own.
+- A run aborted while `onToolCall` was deciding still started the tool. It no longer does.
+- Very deeply nested input or schemas (thousands of levels) are reported as "nested too deeply" instead of overflowing the stack.
+- A sub-agent's own `onUsage` is called as well as the parent's.
+- API error bodies are read only up to the 1,000 characters that are kept, and a refused redirect now says so instead of a bare "fetch failed".
+
 ### Behaviour changes to know about
 - `fileStore` file names changed (and `nanoharness-fs` is a new package). Files written by `nanoharness` 1.x are still read, except where the 1.x name contained upper-case letters or special characters. Re-save those keys once.
 - `maxToolResultChars` output is now shorter than before for the same limit, because the marker counts toward it.
