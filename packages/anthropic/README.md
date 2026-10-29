@@ -34,7 +34,9 @@ A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `st
 
 ```ts
 import { limitConcurrency, withRetry } from "nanoharness";
-const adapter = withRetry(limitConcurrency(anthropic({ ..., maxRetries: 0 }), 4));
+import { anthropic } from "nanoharness-anthropic";
+
+const adapter = withRetry(limitConcurrency(anthropic({ apiKey: process.env.ANTHROPIC_API_KEY!, maxRetries: 0 }), 4));
 ```
 
 Needs `nanoharness` 2.1 or later.

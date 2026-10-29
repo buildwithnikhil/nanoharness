@@ -43,8 +43,11 @@ export interface RunOptions {
   maxModelCalls?: number;
   /** Use the adapter's `stream` (when it has one) and emit `text_delta` events as text arrives. Default false. */
   streaming?: boolean;
-  /** Called with every event of the run, for logging and tracing when you use `run()` rather than `stream()`. */
-  onEvent?: (event: AgentEvent) => void;
+  /**
+   * Called with every event of the run, for logging and tracing when you use `run()` rather than `stream()`.
+   * An async callback is awaited before the run goes on. If it throws or rejects, the run is stopped and the error thrown.
+   */
+  onEvent?: (event: AgentEvent) => void | Promise<void>;
   /** Called with the token usage of every model call, including those of sub-agents. Set by `defineAgent`. */
   onUsage?: (usage: Usage) => void;
   /** Nesting level, set by `defineAgent` for sub-agents. Not normally set by hand. */
@@ -257,7 +260,7 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
     let res: AdapterResponse | undefined;
     const started = Date.now();
     try {
-      const req = { system: opts.system, messages, tools: specs, signal };
+      const req = { system: opts.system, messages: [...messages], tools: specs, signal };
       if (opts.streaming && adapter.stream) {
         for await (const ev of adapter.stream(req)) {
           if (ev.type === "text_delta") yield { type: "text_delta", text: ev.text };
@@ -370,13 +373,13 @@ export async function run(opts: RunOptions): Promise<RunResult> {
  * Runs a stream to its end, passing each event on. If the callback throws, the stream is closed first, so the
  * adapter's request and any concurrency slot are released, and then the error is thrown.
  */
-export async function drain(it: AsyncGenerator<AgentEvent, RunResult>, onEvent?: (event: AgentEvent) => void): Promise<RunResult> {
+export async function drain(it: AsyncGenerator<AgentEvent, RunResult>, onEvent?: (event: AgentEvent) => void | Promise<void>): Promise<RunResult> {
   for (;;) {
     const next = await it.next();
     if (next.done) return next.value;
     if (!onEvent) continue;
     try {
-      onEvent(next.value);
+      await onEvent(next.value);
     } catch (e) {
       await it.return(undefined as never).catch(() => {});
       throw e;

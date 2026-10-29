@@ -79,6 +79,7 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
   const fresh = () => ({ text: "héllo 😀", n: 1.5, list: [1, null, true], nested: { a: [{ b: "c" }] } });
   // Compared in canonical form, so a store that reorders object keys (such as Postgres jsonb) still passes.
   const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+  const timeoutMs = opts.timeoutMs ?? 10_000;
   // After a timeout the check is abandoned: its later store calls are refused, what it finds after that is not
   // reported, and the keys it wrote are cleaned up again once it settles.
   let abandoned = false;
@@ -94,6 +95,8 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
   const cleanup = async () => {
     for (const key of written) await store.delete(key).catch(() => {});
   };
+  // Cleanup is bounded too, so a store whose delete() hangs still gets an answer.
+  const bounded = (p: Promise<void>) => Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.())]);
   const checks = async () => {
     if ((await s.get(k("missing"))) !== undefined) found.push("get() of a missing key should return undefined");
     const value = fresh();
@@ -130,7 +133,6 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
       if (overlap) found.push("lock() let two callers in at once");
     }
   };
-  const timeoutMs = opts.timeoutMs ?? 10_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const running = checks();
   try {
@@ -148,7 +150,7 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
     running.catch(() => {}).finally(cleanup);
   } finally {
     clearTimeout(timer);
-    await cleanup();
+    await bounded(cleanup());
   }
   return problems;
 }

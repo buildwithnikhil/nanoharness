@@ -42,7 +42,9 @@ A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `st
 
 ```ts
 import { limitConcurrency, withRetry } from "nanoharness";
-const adapter = withRetry(limitConcurrency(openai({ ..., maxRetries: 0 }), 4));
+import { openai } from "nanoharness-openai";
+
+const adapter = withRetry(limitConcurrency(openai({ model: "gpt-4.1", apiKey: process.env.OPENAI_API_KEY, maxRetries: 0 }), 4));
 ```
 
 Needs `nanoharness` 2.1 or later.

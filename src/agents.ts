@@ -33,7 +33,7 @@ export interface AgentConfig extends Omit<RunOptions, "prompt" | "onEvent"> {
   /** How deeply agents may call agents. Calls beyond this fail with a tool error. Default 4. */
   maxDepth?: number;
   /** Called for every event of this agent's loop, tagged with its name. */
-  onEvent?: (agent: string, event: AgentEvent) => void;
+  onEvent?: (agent: string, event: AgentEvent) => void | Promise<void>;
 }
 
 export interface Agent {
@@ -124,6 +124,9 @@ export async function parallel(
   input: string | string[],
   opts: { concurrency?: number; signal?: AbortSignal; maxModelCalls?: number } = {},
 ): Promise<PromiseSettledResult<RunResult>[]> {
+  if (Array.isArray(input) && input.length !== agents.length) {
+    throw new Error(`parallel(): got ${input.length} inputs for ${agents.length} agents; pass one input each, or one string for all`);
+  }
   const budget = sharedBudget(opts.maxModelCalls);
   const out: PromiseSettledResult<RunResult>[] = new Array(agents.length);
   let next = 0;
