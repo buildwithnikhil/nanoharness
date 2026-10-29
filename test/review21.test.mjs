@@ -218,3 +218,34 @@ test("readSSE reads one long line in many chunks in linear time", async () => {
   assert.equal(ev.data.length, 12 * 1024 * 1024);
   assert.ok(Date.now() - t < 1000, `took ${Date.now() - t} ms`);
 });
+
+// ---------------- master review
+
+test("checkStore after a timeout stops writing, leaves no keys, and does not change its result", async () => {
+  const inner = memoryStore();
+  let first = true;
+  const slow = { ...inner, get: async (k) => { if (first) { first = false; await sleep(150); } return inner.get(k); } };
+  const problems = await checkStore(slow, "p:", { timeoutMs: 30 });
+  const snapshot = [...problems];
+  await sleep(300);
+  assert.deepEqual(problems, snapshot, "the returned list is not changed later");
+  assert.deepEqual(await inner.keys(), [], "no keys are left behind");
+});
+
+test("promptAdapter finds a call among text even when braces follow it, and ignores unknown tools there", async () => {
+  const one = (reply) => promptAdapter({ generate: async () => reply }).complete({ messages: [{ role: "user", content: "x" }], tools: [{ name: "search", description: "", input_schema: { type: "object" } }] });
+  const r = await one('I will search. {"tool_calls":[{"name":"search","input":{"q":"a}b"}}]} (then I will summarize {results})');
+  assert.equal(r.stopReason, "tool_use");
+  assert.deepEqual(r.content.find((b) => b.type === "tool_use").input, { q: "a}b" });
+  const mention = await one('Answer: use {"tool_calls":[{"name":"x","input":{}}]} in your API. Done.');
+  assert.equal(mention.stopReason, "end_turn", "a call to an unknown tool inside prose is just text");
+});
+
+test("withRetry retries browser network errors", async () => {
+  for (const msg of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+    let calls = 0;
+    const net = { complete: async () => { calls++; throw new TypeError(msg); } };
+    await assert.rejects(withRetry(net, { baseDelayMs: 1, maxRetries: 1 }).complete({ messages: [], tools: [] }));
+    assert.equal(calls, 2, msg);
+  }
+});

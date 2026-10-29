@@ -35,7 +35,7 @@ export function defineAdapter(adapter: Adapter): Adapter {
   return adapter;
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason);
     const onAbort = () => {
@@ -132,6 +132,8 @@ export interface RetryOptions {
   retryable?: (error: unknown) => boolean;
 }
 
+// Node ("fetch failed", "terminated" for a dropped connection), Chrome and Safari.
+const BROWSER_NETWORK = new Set(["fetch failed", "terminated", "Failed to fetch", "Load failed"]);
 const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR_\w+)$/;
 
 // A network failure from fetch, recognised by its exact message or its cause's error code, never by a loose
@@ -139,7 +141,7 @@ const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENO
 const isNetworkError = (e: unknown): boolean => {
   if (!(e instanceof TypeError)) return false;
   const code = (e as { cause?: { code?: unknown } }).cause?.code;
-  return e.message === "fetch failed" || e.message === "terminated" || (typeof code === "string" && NETWORK_CODE.test(code));
+  return BROWSER_NETWORK.has(e.message) || /^NetworkError when attempting to fetch resource/.test(e.message) || (typeof code === "string" && NETWORK_CODE.test(code));
 };
 
 const defaultRetryable = (e: unknown): boolean => (e instanceof AdapterError ? e.retryable : isNetworkError(e));
@@ -323,24 +325,42 @@ function readToolCalls(json: string): ParsedCall[] | undefined {
   });
 }
 
+/** The index just past the JSON object that starts at `start`, skipping braces inside strings; -1 if it never closes. */
+function objectEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      if (c === "\\") i++;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
 /**
- * Finds a `{"tool_calls": [...]}` object in a reply: the whole reply, a fenced block, or an object after some
- * text. Returns the calls and any text around them.
+ * Finds a `{"tool_calls": [...]}` object in a reply: the whole reply, a fenced block, or an object among other
+ * text. Returns the calls and any text around them. A call found among other text must name a known tool, so an
+ * answer that only mentions the format is not run.
  */
-function parseToolCalls(text: string): { calls: ParsedCall[]; text: string } | undefined {
+function parseToolCalls(text: string, known: Set<string>): { calls: ParsedCall[]; text: string } | undefined {
   const body = text.trim();
   if (!body.includes('"tool_calls"')) return undefined;
   const whole = readToolCalls(body);
   if (whole) return { calls: whole, text: "" };
+  const allKnown = (calls: ParsedCall[]) => calls.every((c) => known.has(c.name));
   for (const m of body.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
     const calls = readToolCalls(m[1]!.trim());
-    if (calls) return { calls, text: (body.slice(0, m.index) + body.slice(m.index! + m[0].length)).trim() };
+    if (calls && allKnown(calls)) return { calls, text: (body.slice(0, m.index) + body.slice(m.index! + m[0].length)).trim() };
   }
-  const at = body.search(/\{\s*"tool_calls"/);
-  const end = body.lastIndexOf("}");
-  if (at !== -1 && end > at) {
-    const calls = readToolCalls(body.slice(at, end + 1));
-    if (calls) return { calls, text: (body.slice(0, at) + body.slice(end + 1)).trim() };
+  for (const m of body.matchAll(/\{\s*"tool_calls"/g)) {
+    const end = objectEnd(body, m.index!);
+    if (end === -1) break;
+    const calls = readToolCalls(body.slice(m.index, end));
+    if (calls && allKnown(calls)) return { calls, text: (body.slice(0, m.index) + body.slice(end)).trim() };
   }
   return undefined;
 }
@@ -368,7 +388,7 @@ export function promptAdapter(opts: PromptAdapterOptions): Adapter {
       const text = typeof reply === "string" ? reply : reply.text;
       const usage = typeof reply === "string" ? undefined : reply.usage;
 
-      const found = req.tools.length > 0 ? parseToolCalls(text) : undefined;
+      const found = req.tools.length > 0 ? parseToolCalls(text, new Set(req.tools.map((t) => t.name))) : undefined;
       if (found) {
         const content: Array<TextBlock | ToolUseBlock> = found.text ? [{ type: "text", text: found.text }] : [];
         for (const c of found.calls) {
