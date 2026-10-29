@@ -112,3 +112,64 @@ test("geminiCompatible works with only the core, and a Gemini signature never re
     assert.ok(!body.includes("sig"), body);
   }
 });
+
+// ---------------- network sweep
+
+const formats = [
+  ["openai", (fetch, extra = {}) => openaiCompatible({ baseUrl: "https://x.example.com/v1", model: "m", apiKey: "sk-secret", fetch, ...extra }), { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }],
+  ["anthropic", (fetch, extra = {}) => anthropicCompatible({ baseUrl: "https://x.example.com", model: "m", apiKey: "sk-secret", fetch, ...extra }), { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }],
+  ["gemini", (fetch, extra = {}) => geminiCompatible({ baseUrl: "https://x.example.com/v1beta", model: "m", apiKey: "sk-secret", fetch, ...extra }), { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }],
+];
+
+test("custom headers replace the defaults whatever their case", async () => {
+  for (const [label, make, ok] of formats) {
+    let headers;
+    const adapter = make(async (_, init) => ((headers = new Headers(init.headers)), json(ok)), { headers: { Authorization: "Bearer GW", "X-Api-Key": "GW", "X-Goog-Api-Key": "GW", "Content-Type": "application/json; charset=utf-8" } });
+    await run({ adapter, prompt: "x" });
+    assert.ok(![...headers.values()].some((v) => v.includes("sk-secret")), `${label}: the default key is not sent alongside`);
+    assert.equal(headers.get("content-type"), "application/json; charset=utf-8", label);
+  }
+});
+
+test("a well-formed but wrong body is an AdapterError, never a TypeError", async () => {
+  const bodies = ["null", "[]", "{}", '{"type":"error","error":{"message":"gateway says no"}}', '{"content":"hi"}', '{"choices":[{"message":{"tool_calls":[{"id":"c"}]}}]}', '{"candidates":[{"content":{"parts":null}}]}', "<html>oops</html>"];
+  for (const [label, make] of formats) {
+    for (const body of bodies) {
+      const adapter = make(async () => new Response(body, { status: 200 }));
+      try {
+        const r = await adapter.complete({ messages: [{ role: "user", content: "x" }], tools: [] });
+        assert.ok(Array.isArray(r.content), `${label} ${body}`);
+      } catch (e) {
+        assert.ok(e instanceof AdapterError, `${label} ${body}: ${e}`);
+      }
+    }
+  }
+  const gw = formats[1][1](async () => new Response('{"type":"error","error":{"message":"gateway says no"}}'));
+  await assert.rejects(gw.complete({ messages: [], tools: [] }), /gateway says no/);
+});
+
+test("a connection dropped while reading a whole reply is retried as a network error", async () => {
+  for (const [label, make, ok] of formats) {
+    let calls = 0;
+    const server = http.createServer((req, res) => {
+      req.resume();
+      if (++calls === 1) {
+        res.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+        res.write('{"partial":');
+        setTimeout(() => res.socket.destroy(), 20);
+      } else res.end(JSON.stringify(ok));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    try {
+      const port = server.address().port;
+      const base = label === "openai" ? `http://127.0.0.1:${port}/v1` : label === "gemini" ? `http://127.0.0.1:${port}/v1beta` : `http://127.0.0.1:${port}`;
+      const adapter = make(fetch, { baseUrl: base, maxRetries: 0 });
+      const r = await run({ adapter: withRetry(adapter, { baseDelayMs: 1 }), prompt: "x" });
+      assert.equal(r.finalText, "ok", label);
+      assert.equal(calls, 2, label);
+    } finally {
+      server.close();
+      server.closeAllConnections?.();
+    }
+  }
+});

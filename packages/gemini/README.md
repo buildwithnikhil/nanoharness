@@ -54,7 +54,9 @@ A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `st
 
 ```ts
 import { limitConcurrency, withRetry } from "nanoharness";
-const adapter = withRetry(limitConcurrency(gemini({ ..., maxRetries: 0 }), 4));
+import { gemini } from "nanoharness-gemini";
+
+const adapter = withRetry(limitConcurrency(gemini({ model: "gemini-2.5-flash", apiKey: process.env.GEMINI_API_KEY, maxRetries: 0 }), 4));
 ```
 
 Redirects are never followed, so your key and conversation cannot be forwarded to another host.

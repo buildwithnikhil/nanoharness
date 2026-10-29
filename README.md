@@ -69,7 +69,7 @@ const lead = defineAgent({
   adapter,
   system: "Delegate research, then answer.",
   tools: [researcher.asTool("Researches a topic and reports findings")],
-  onEvent: (agent, ev) => console.log(agent, ev.type), // trace every agent's loop
+  onEvent: (agent, ev) => console.log(agent, ev.type), // the lead's own loop; give each worker an onEvent to trace it too
 });
 await lead.run("What changed in Node 24?");
 
@@ -156,7 +156,7 @@ const chat = session(store, "user-42", {
 });
 ```
 
-The summary is placed at the front of the kept history and is itself summarised again later. `trimHistory(messages, { maxMessages })` is the same trimming as a plain function, for histories you manage yourself.
+Trimming happens before each run, so what is stored after a run can be longer by that run's messages. The summary is placed at the front of the kept history and is itself summarised again later. `trimHistory(messages, { maxMessages })` is the same trimming as a plain function, for histories you manage yourself.
 
 `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. A `Store` is four methods (`get`, `set`, `delete`, `keys`), plus an optional `lock` for stores shared by several processes, so you can back it with Redis, Postgres or anything else in a few lines. Run `checkStore(yourStore)` from `nanoharness/store` to confirm it behaves as expected; it returns a list of problems, empty when it passes.
 

@@ -140,7 +140,7 @@ function check(value: unknown, schema: JSONSchema, path: string, depth: number):
   if (Array.isArray(value)) {
     if (typeof schema.minItems === "number" && value.length < schema.minItems) return `${path}: needs at least ${schema.minItems} items`;
     if (typeof schema.maxItems === "number" && value.length > schema.maxItems) return `${path}: allows at most ${schema.maxItems} items`;
-    if (schema.uniqueItems === true && new Set(value.map(canonical)).size !== value.length) return `${path}: items must be unique`;
+    if (schema.uniqueItems === true && new Set(value.map((v) => canonical(v))).size !== value.length) return `${path}: items must be unique`;
     if (schema.items && typeof schema.items === "object" && !Array.isArray(schema.items)) {
       for (let i = 0; i < value.length; i++) {
         const err = check(value[i], schema.items as JSONSchema, `${path}[${i}]`, depth + 1);

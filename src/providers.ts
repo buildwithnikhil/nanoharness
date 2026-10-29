@@ -96,6 +96,29 @@ function endpoint(name: string, baseUrl: string, path: string, allowInsecureHttp
   return `${u.origin}${u.pathname.replace(/\/+$/, "")}${path}`;
 }
 
+// Header names are case-insensitive, so `Authorization` from the caller replaces the default `authorization`
+// instead of being sent next to it.
+function mergeHeaders(defaults: Record<string, string>, extra: Record<string, string> = {}): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(defaults)) out[k.toLowerCase()] = v;
+  for (const [k, v] of Object.entries(extra)) out[k.toLowerCase()] = v;
+  return out;
+}
+
+// Reads a JSON body. A connection dropped while reading stays a network error (so withRetry can retry it); only
+// a body that is not JSON, or not an object, becomes "invalid JSON".
+async function readJson(name: string, res: Response): Promise<Record<string, unknown>> {
+  const text = await res.text();
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    throw new AdapterError(`${name} returned invalid JSON: ${text.slice(0, 200)}`, { cause: e });
+  }
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new AdapterError(`${name} returned an unexpected body: ${text.slice(0, 200)}`);
+  return data as Record<string, unknown>;
+}
+
 // Sends a JSON request, retrying rate limits and server errors; a final failure is an AdapterError with the status.
 function requester(name: string, opts: HttpOptions, url: string, headers: Record<string, string>, retryable: Set<number>) {
   if (typeof opts.fetch !== "function") throw new Error(`${name}: fetch is required (pass the global fetch, or your own)`);
@@ -110,7 +133,7 @@ function requester(name: string, opts: HttpOptions, url: string, headers: Record
           signal,
           // Never follow a redirect: the request carries your API key and the whole conversation.
           redirect: "error",
-          headers: { "content-type": "application/json", ...headers, ...opts.headers },
+          headers: mergeHeaders({ "content-type": "application/json", ...headers }, opts.headers),
           body: payload,
         });
       } catch (e) {
@@ -233,20 +256,17 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
   return {
     async complete(req): Promise<AdapterResponse> {
       const res = await request(body(req, false), req.signal);
-      let data: {
-        choices?: { message?: { content?: string | null; tool_calls?: { id: string; function: { name: string; arguments: string } }[] }; finish_reason?: string }[];
+      const data = (await readJson(name, res)) as {
+        choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string }[];
         usage?: { prompt_tokens: number; completion_tokens: number };
+        error?: { message?: string };
       };
-      try {
-        data = (await res.json()) as typeof data;
-      } catch {
-        throw new AdapterError(`${name} returned invalid JSON`);
-      }
-      const choice = data.choices?.[0];
-      if (!choice?.message) throw new AdapterError(`${name} returned no choices`);
-      const calls = (choice.message.tool_calls ?? []).map((tc) => ({ id: tc.id, name: tc.function.name, args: tc.function.arguments }));
+      const choice = Array.isArray(data.choices) ? data.choices[0] : undefined;
+      if (!choice?.message) throw new AdapterError(`${name} returned no choices${data.error?.message ? `: ${data.error.message}` : ""}`);
+      const toolCalls = Array.isArray(choice.message.tool_calls) ? choice.message.tool_calls : [];
+      const calls = toolCalls.map((tc) => ({ id: tc?.id ?? "", name: tc?.function?.name ?? "", args: tc?.function?.arguments ?? "" }));
       return assemble(
-        choice.message.content ?? "",
+        typeof choice.message.content === "string" ? choice.message.content : "",
         calls,
         choice.finish_reason,
         data.usage && { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens },
@@ -352,19 +372,16 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
   return {
     async complete(req): Promise<AdapterResponse> {
       const res = await request(body(req, false), req.signal);
-      let data: {
-        content: Array<TextBlock | ToolUseBlock | { type: string }>;
-        stop_reason: string;
+      const data = (await readJson(name, res)) as {
+        content?: Array<TextBlock | ToolUseBlock | { type: string }>;
+        stop_reason?: string;
         usage?: { input_tokens: number; output_tokens: number };
+        error?: { message?: string };
       };
-      try {
-        data = (await res.json()) as typeof data;
-      } catch {
-        throw new AdapterError(`${name} returned invalid JSON`);
-      }
+      if (!Array.isArray(data.content)) throw new AdapterError(`${name} returned no content${data.error?.message ? `: ${data.error.message}` : ""}`);
       return {
-        content: data.content.filter((b): b is TextBlock | ToolUseBlock => b.type === "text" || b.type === "tool_use"),
-        stopReason: ANTHROPIC_STOP[data.stop_reason] ?? "other",
+        content: data.content.filter((b): b is TextBlock | ToolUseBlock => !!b && (b.type === "text" || b.type === "tool_use")),
+        stopReason: ANTHROPIC_STOP[data.stop_reason ?? ""] ?? "other",
         usage: data.usage && {
           inputTokens: data.usage.input_tokens,
           outputTokens: data.usage.output_tokens,
@@ -567,20 +584,15 @@ export function geminiCompatible(opts: GeminiCompatibleOptions): Adapter {
   return {
     async complete(req): Promise<AdapterResponse> {
       const res = await once(body(req), req.signal);
-      let data: GeminiChunk;
-      try {
-        data = (await res.json()) as GeminiChunk;
-      } catch {
-        throw new AdapterError(`${name} returned invalid JSON`);
-      }
+      const data = (await readJson(name, res)) as GeminiChunk;
       blocked(data);
       const cand = data.candidates?.[0];
-      if (!cand) throw new AdapterError(`${name} returned no candidates`);
+      if (!cand) throw new AdapterError(`${name} returned no candidates${data.error?.message ? `: ${data.error.message}` : ""}`);
       let text = "";
       const calls: ToolUseBlock[] = [];
-      for (const part of cand.content?.parts ?? []) {
-        if (part.functionCall) calls.push(call(part));
-        else if (part.text && !part.thought) text += part.text;
+      for (const part of Array.isArray(cand.content?.parts) ? cand.content.parts : []) {
+        if (part?.functionCall) calls.push(call(part));
+        else if (typeof part?.text === "string" && !part.thought) text += part.text;
       }
       return respond(text, calls, cand.finishReason, geminiUsage(data.usageMetadata));
     },

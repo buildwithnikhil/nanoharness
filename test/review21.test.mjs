@@ -249,3 +249,50 @@ test("withRetry retries browser network errors", async () => {
     assert.equal(calls, 2, msg);
   }
 });
+
+// ---------------- feature sweep
+
+import { validate } from "../dist/index.js";
+import { parallel } from "../dist/agents.js";
+
+test("uniqueItems works on long arrays", () => {
+  const schema = { type: "array", uniqueItems: true };
+  assert.equal(validate(Array.from({ length: 1000 }, (_, i) => i), schema), null);
+  assert.match(validate([...Array.from({ length: 300 }, (_, i) => i), 5], schema), /unique/);
+  const nested = [...Array.from({ length: 250 }, (_, i) => i), { a: { b: { c: { d: { e: [1] } } } } }];
+  assert.equal(validate(nested, schema), null);
+});
+
+test("checkStore returns on time even when delete() hangs", async () => {
+  const hanging = { ...memoryStore(), get: () => new Promise(() => {}), delete: () => new Promise(() => {}) };
+  const t = Date.now();
+  const problems = await checkStore(hanging, "p:", { timeoutMs: 50 });
+  assert.ok(Date.now() - t < 1000, `took ${Date.now() - t} ms`);
+  assert.ok(problems.some((p) => p.includes("did not finish")));
+});
+
+test("an async onEvent is awaited, and its rejection stops the run and is thrown", async () => {
+  const { adapter, state } = closable();
+  const order = [];
+  await run({ adapter, prompt: "hi", streaming: true, onEvent: async (e) => { await sleep(1); order.push(e.type); } });
+  assert.deepEqual(order.slice(-2), ["text", "done"]);
+  const second = closable();
+  await assert.rejects(run({ adapter: second.adapter, prompt: "hi", streaming: true, onEvent: async (e) => { if (e.type === "text_delta") throw new Error("async logger broke"); } }), /async logger broke/);
+  assert.equal(second.state.closed, true);
+  const agent = defineAgent({ name: "a", adapter: closable().adapter, onEvent: async () => { throw new Error("agent logger"); } });
+  await assert.rejects(agent.run("hi"), /agent logger/);
+});
+
+test("an adapter gets a copy of the history, not the live array", async () => {
+  const seen = [];
+  const replies = [{ content: [{ type: "tool_use", id: "c", name: "t", input: {} }], stopReason: "tool_use" }, text("done")];
+  const adapter = { complete: async (req) => (seen.push(req.messages), replies.shift()) };
+  const t = defineTool({ name: "t", description: "", schema: { type: "object" }, run: () => "r" });
+  await run({ adapter, prompt: "go", tools: [t] });
+  assert.equal(seen[0].length, 1, "the first request still has one message after the run went on");
+});
+
+test("parallel() rejects a list of inputs that does not match the agents", async () => {
+  const a = defineAgent({ name: "a", adapter: { complete: async () => text("x") } });
+  await assert.rejects(parallel([a, a], ["only one"]), /got 1 inputs for 2 agents/);
+});

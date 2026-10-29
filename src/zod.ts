@@ -11,6 +11,9 @@ export interface ZodToolOptions<S extends z.ZodType> {
 
 // The model supplies input, so the schema it sees describes the input side (a field with a default is optional).
 function jsonSchema(schema: z.ZodType, name: string): JSONSchema {
+  if (typeof z.toJSONSchema !== "function") {
+    throw new Error(`defineZodTool "${name}": needs zod 4 or later (z.toJSONSchema is missing; zod 3 is not supported)`);
+  }
   const { $schema: _omit, ...rest } = z.toJSONSchema(schema, { io: "input" }) as JSONSchema;
   if (rest.type !== "object") {
     throw new Error(`defineZodTool "${name}": the schema must be a z.object(...), because tool input has to be a JSON object`);
