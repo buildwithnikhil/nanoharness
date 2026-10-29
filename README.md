@@ -3,7 +3,7 @@
 A lightweight, zero-dependency agent harness. You give it a model adapter and some tools. It runs the tool-use loop.
 
 - **Zero runtime dependencies. The core never touches the network or the disk by itself:** its model adapters use the `fetch` you pass in, and file access lives in a companion package.
-- **Any model, with the core alone.** `openaiCompatible` and `anthropicCompatible` connect to any server in those formats (OpenAI, Anthropic, Ollama, vLLM, OpenRouter, a gateway, your own), and `promptAdapter` gives tool calling to any text-in, text-out model. The optional `nanoharness-anthropic` and `nanoharness-openai` packages add the official defaults.
+- **Any model, with the core alone.** `openaiCompatible`, `anthropicCompatible` and `geminiCompatible` connect to any server in those formats (OpenAI, Anthropic, Gemini, Vertex AI, Ollama, vLLM, OpenRouter, a gateway, your own), and `promptAdapter` gives tool calling to any text-in, text-out model. The optional `nanoharness-anthropic`, `nanoharness-openai` and `nanoharness-gemini` packages add the official defaults.
 - **Bring your own tools.** There are no built-in tools and no shell access. Sandboxed file tools are an optional companion package.
 - **Scales up when you need it.** Multi-agent orchestration, planning, workflow graphs and sessions are opt-in subpath imports (`nanoharness/agents`, `/graph`, `/store`). Apps that don't import them don't pay for them.
 - **Streaming, tracing and scaling helpers.** Token streaming, timing events, shared rate limits, retries for any adapter, and bounded conversation history. All opt-in.
@@ -14,10 +14,11 @@ A lightweight, zero-dependency agent harness. You give it a model adapter and so
 | `nanoharness` | The loop, tools, guardrails, agents, graphs, in-memory store and sessions, plus adapters for any OpenAI- or Anthropic-format server. Works on its own. |
 | [`nanoharness-anthropic`](packages/anthropic) | Adapter for Claude. |
 | [`nanoharness-openai`](packages/openai) | Adapter for OpenAI and any OpenAI-compatible server (Ollama, vLLM, OpenRouter, LM Studio, Groq, ...). |
+| [`nanoharness-gemini`](packages/gemini) | Adapter for Google Gemini: the Gemini API and Vertex AI. |
 | [`nanoharness-fs`](packages/fs) | Sandboxed `read_file` / `list_dir` / `write_file` tools and a file-backed store. |
 
 ```sh
-npm install nanoharness nanoharness-anthropic   # or nanoharness-openai
+npm install nanoharness nanoharness-anthropic   # or nanoharness-openai, nanoharness-gemini
 npm install nanoharness                         # on its own, for a custom or self-hosted model
 ```
 
@@ -206,7 +207,7 @@ The final `text` event and the result are the same as without streaming. `define
 
 None of these need a companion package; `nanoharness` on its own is enough.
 
-**1. A server that speaks the OpenAI or Anthropic format** (Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, Groq, Together, LiteLLM, a company gateway, or your own server). Use `openaiCompatible` or `anthropicCompatible` from the core. You pass the `fetch` to use and the `baseUrl`, so the core never reaches for the network by itself.
+**1. A server that speaks the OpenAI, Anthropic or Gemini format** (Ollama, vLLM, LM Studio, llama.cpp, OpenRouter, Groq, Together, LiteLLM, Vertex AI, a company gateway, or your own server). Use `openaiCompatible`, `anthropicCompatible` or `geminiCompatible` from the core. You pass the `fetch` to use and the `baseUrl`, so the core never reaches for the network by itself.
 
 ```ts
 import { run, openaiCompatible, anthropicCompatible } from "nanoharness";
@@ -226,14 +227,14 @@ const gateway = anthropicCompatible({
 await run({ adapter: local, prompt: "What is 12 * 7?", tools: [multiply], streaming: true });
 ```
 
-They have everything the official adapters have: streaming, tool calls, token usage, retries with backoff, `AdapterError` with the status, no redirects followed, and no API key over plain http to a remote host (`allowInsecureHttp: true` for a server on your LAN). `nanoharness-openai` and `nanoharness-anthropic` are exactly these adapters with the official URL and the global `fetch` filled in.
+They have everything the official adapters have: streaming, tool calls, token usage, retries with backoff, `AdapterError` with the status, no redirects followed, and no API key over plain http to a remote host (`allowInsecureHttp: true` for a server on your LAN). `nanoharness-openai`, `nanoharness-anthropic` and `nanoharness-gemini` are exactly these adapters with the official URL and the global `fetch` filled in.
 
-| Option | `openaiCompatible` | `anthropicCompatible` |
-|---|---|---|
-| `baseUrl`, `model`, `fetch` | Required. `baseUrl` ends before `/chat/completions`. | Required. `baseUrl` ends before `/v1/messages`. |
-| `apiKey` | Sent as a Bearer token, if set. | Sent as `x-api-key`, if set. |
-| `headers` | Extra headers; they can replace the defaults (e.g. a gateway's own auth header). | Same. |
-| `maxTokens`, `temperature`, `maxRetries` (default 2), `allowInsecureHttp`, `name` | Yes. Also `maxTokensParam` and `streamUsage`. | Yes. `maxTokens` defaults to 4096. Also `version` (the `anthropic-version` header). |
+| Option | `openaiCompatible` | `anthropicCompatible` | `geminiCompatible` |
+|---|---|---|---|
+| `baseUrl`, `model`, `fetch` | Required. `baseUrl` ends before `/chat/completions`. | Required. `baseUrl` ends before `/v1/messages`. | Required. `baseUrl` ends before `/models/{model}:generateContent`. |
+| `apiKey` | Sent as a Bearer token, if set. | Sent as `x-api-key`, if set. | Sent as `x-goog-api-key`, if set. |
+| `headers` | Extra headers; they can replace the defaults (e.g. a gateway's own auth header). | Same. | Same (e.g. a Vertex AI bearer token). |
+| `maxTokens`, `temperature`, `maxRetries` (default 2), `allowInsecureHttp`, `name` | Yes. Also `maxTokensParam` and `streamUsage`. | Yes. `maxTokens` defaults to 4096. Also `version` (the `anthropic-version` header). | Yes. |
 
 **2. Any text-in, text-out model** (a local model, a CLI, an API without native tool calling) works with `promptAdapter`. You write one function that sends text and returns text; tools are described in the system text and the model calls them by replying with JSON.
 
@@ -425,7 +426,7 @@ const tools = createFsTools({ root: "./workspace" }); // read_file, list_dir
 
 ### Adapters
 
-`openaiCompatible` and `anthropicCompatible` in the core connect to any server in those formats; see [Custom models](#custom-models), which also covers writing your own. The official adapters, [`nanoharness-anthropic`](packages/anthropic) and [`nanoharness-openai`](packages/openai), support streaming, retry rate limits and server errors with backoff, throw `AdapterError` with the status, never follow a redirect (so your key and conversation cannot be forwarded to another host), and refuse to send your API key over plain http to a remote host.
+`openaiCompatible`, `anthropicCompatible` and `geminiCompatible` in the core connect to any server in those formats; see [Custom models](#custom-models), which also covers writing your own. The official adapters, [`nanoharness-anthropic`](packages/anthropic), [`nanoharness-openai`](packages/openai) and [`nanoharness-gemini`](packages/gemini), support streaming, retry rate limits and server errors with backoff, throw `AdapterError` with the status, never follow a redirect (so your key and conversation cannot be forwarded to another host), and refuse to send your API key over plain http to a remote host.
 
 ## Not included
 

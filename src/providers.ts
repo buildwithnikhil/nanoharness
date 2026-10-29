@@ -437,3 +437,184 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
     },
   };
 }
+
+// ---------------------------------------------------------------- Gemini generateContent format
+
+export interface GeminiCompatibleOptions extends HttpOptions {
+  /**
+   * Base URL ending before /models/{model}:generateContent: for the Gemini API, Google's address with /v1beta
+   * added; for Vertex AI, the address of your project's publisher, e.g. .../v1/projects/P/locations/L/publishers/google.
+   */
+  baseUrl: string;
+  /** Sent as the `x-goog-api-key` header. For Vertex AI, leave it out and pass `headers: { authorization: "Bearer ..." }`. */
+  apiKey?: string;
+}
+
+const GEMINI_RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
+
+type GeminiPart = {
+  text?: string;
+  thought?: boolean;
+  thoughtSignature?: string;
+  functionCall?: { id?: string; name?: string; args?: unknown };
+  functionResponse?: { id?: string; name: string; response: Record<string, unknown> };
+};
+type GeminiContent = { role: "user" | "model"; parts: GeminiPart[] };
+type GeminiChunk = {
+  candidates?: { content?: { parts?: GeminiPart[] }; finishReason?: string }[];
+  promptFeedback?: { blockReason?: string };
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number };
+  error?: { message?: string; status?: string };
+};
+
+// Ids made up here (Gemini does not always give one) are not sent back.
+const LOCAL_ID = "nh_gemini_";
+
+function toGeminiContents(messages: Message[]): GeminiContent[] {
+  const out: GeminiContent[] = [];
+  const names = new Map<string, string>(); // a function response must name its function
+  for (const m of messages) {
+    const role = m.role === "assistant" ? "model" : "user";
+    const parts: GeminiPart[] = [];
+    if (typeof m.content === "string") {
+      if (m.content) parts.push({ text: m.content });
+    } else {
+      for (const b of m.content) {
+        if (b.type === "text") {
+          if (b.text) parts.push({ text: b.text });
+        } else if (b.type === "tool_use") {
+          names.set(b.id, b.name);
+          const id = b.id.startsWith(LOCAL_ID) ? {} : { id: b.id };
+          parts.push({ functionCall: { ...id, name: b.name, args: b.input }, ...(b.signature ? { thoughtSignature: b.signature } : {}) });
+        } else {
+          const id = b.tool_use_id.startsWith(LOCAL_ID) ? {} : { id: b.tool_use_id };
+          const response = b.is_error ? { error: b.content } : { result: b.content };
+          parts.push({ functionResponse: { ...id, name: names.get(b.tool_use_id) ?? "unknown", response } });
+        }
+      }
+    }
+    if (parts.length > 0) out.push({ role, parts });
+  }
+  return out;
+}
+
+const GEMINI_STOP: Record<string, AdapterStopReason> = { STOP: "end_turn", MAX_TOKENS: "max_tokens" };
+
+function geminiUsage(u: GeminiChunk["usageMetadata"]): Usage | undefined {
+  if (!u) return undefined;
+  // Thinking tokens are billed as output.
+  return { inputTokens: u.promptTokenCount ?? 0, outputTokens: (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0) };
+}
+
+/** An adapter for the Gemini API (Google AI Studio) or Vertex AI, or any server that speaks Gemini's format. */
+export function geminiCompatible(opts: GeminiCompatibleOptions): Adapter {
+  const name = opts.name ?? "Gemini-compatible API";
+  if (!opts.model) throw new Error(`${name}: model is required`);
+  const model = opts.model.replace(/^models\//, "");
+  if (/[?#\s]/.test(model)) throw new Error(`${name}: invalid model "${opts.model}"`);
+  const path = `/models/${encodeURI(model)}`;
+  const headers: Record<string, string> = opts.apiKey ? { "x-goog-api-key": opts.apiKey } : {};
+  const once = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:generateContent`, opts.allowInsecureHttp ?? false), headers, GEMINI_RETRYABLE);
+  const streamed = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:streamGenerateContent?alt=sse`, opts.allowInsecureHttp ?? false), headers, GEMINI_RETRYABLE);
+  let counter = 0;
+  const prefix = Math.random().toString(36).slice(2, 8);
+
+  const body = (req: AdapterRequest) =>
+    JSON.stringify({
+      contents: toGeminiContents(req.messages),
+      ...(req.system ? { systemInstruction: { parts: [{ text: req.system }] } } : {}),
+      ...(req.tools.length
+        ? { tools: [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parametersJsonSchema: t.input_schema })) }] }
+        : {}),
+      ...(opts.maxTokens !== undefined || opts.temperature !== undefined
+        ? { generationConfig: { ...(opts.maxTokens !== undefined ? { maxOutputTokens: opts.maxTokens } : {}), ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}) } }
+        : {}),
+    });
+
+  const call = (part: GeminiPart): ToolUseBlock => {
+    const fc = part.functionCall!;
+    const id = fc.id || `${LOCAL_ID}${prefix}_${++counter}`;
+    const args = fc.args ?? {};
+    const ok = args !== null && typeof args === "object" && !Array.isArray(args);
+    return {
+      type: "tool_use",
+      id,
+      name: fc.name ?? "",
+      input: ok ? (args as Record<string, unknown>) : {},
+      ...(ok ? {} : { error: "arguments must be a JSON object" }),
+      ...(part.thoughtSignature ? { signature: part.thoughtSignature } : {}),
+    };
+  };
+
+  const respond = (text: string, calls: ToolUseBlock[], finish: string | undefined, usage?: Usage): AdapterResponse => {
+    const content: Array<TextBlock | ToolUseBlock> = [];
+    if (text) content.push({ type: "text", text });
+    content.push(...calls);
+    return {
+      content,
+      // A call cut off by the token limit is incomplete, so MAX_TOKENS wins over tool calls.
+      stopReason: finish === "MAX_TOKENS" ? "max_tokens" : calls.length ? "tool_use" : (GEMINI_STOP[finish ?? ""] ?? "other"),
+      ...(usage ? { usage } : {}),
+    };
+  };
+
+  const blocked = (data: GeminiChunk) => {
+    if (!data.candidates?.length && data.promptFeedback?.blockReason) {
+      throw new AdapterError(`${name} blocked the prompt: ${data.promptFeedback.blockReason}`, { retryable: false });
+    }
+  };
+
+  return {
+    async complete(req): Promise<AdapterResponse> {
+      const res = await once(body(req), req.signal);
+      let data: GeminiChunk;
+      try {
+        data = (await res.json()) as GeminiChunk;
+      } catch {
+        throw new AdapterError(`${name} returned invalid JSON`);
+      }
+      blocked(data);
+      const cand = data.candidates?.[0];
+      if (!cand) throw new AdapterError(`${name} returned no candidates`);
+      let text = "";
+      const calls: ToolUseBlock[] = [];
+      for (const part of cand.content?.parts ?? []) {
+        if (part.functionCall) calls.push(call(part));
+        else if (part.text && !part.thought) text += part.text;
+      }
+      return respond(text, calls, cand.finishReason, geminiUsage(data.usageMetadata));
+    },
+
+    async *stream(req) {
+      const res = await streamed(body(req), req.signal);
+      if (!res.body) throw new AdapterError(`${name} returned an empty stream`);
+      let text = "";
+      const calls: ToolUseBlock[] = [];
+      let finish: string | undefined;
+      let usage: Usage | undefined;
+      for await (const { data } of readSSE(res.body)) {
+        let chunk: GeminiChunk;
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          throw new AdapterError(`${name} sent an invalid stream chunk`);
+        }
+        if (chunk.error) throw new AdapterError(`${name} stream error: ${chunk.error.message ?? chunk.error.status ?? "unknown"}`);
+        blocked(chunk);
+        usage = geminiUsage(chunk.usageMetadata) ?? usage;
+        const cand = chunk.candidates?.[0];
+        if (!cand) continue;
+        for (const part of cand.content?.parts ?? []) {
+          if (part.functionCall) calls.push(call(part));
+          else if (part.text && !part.thought) {
+            text += part.text;
+            yield { type: "text_delta", text: part.text };
+          }
+        }
+        if (cand.finishReason) finish = cand.finishReason;
+      }
+      if (finish === undefined) throw new AdapterError(`${name} stream ended early`, { retryable: false });
+      yield { type: "response", response: respond(text, calls, finish, usage) };
+    },
+  };
+}

@@ -26,6 +26,7 @@ Building needs Node 22.18 or later, or 24.11 or later (the `tsup` bundler requir
 | `src/` | `nanoharness` (core, `agents`, `graph`, `store`, `zod`) |
 | `packages/anthropic` | `nanoharness-anthropic` |
 | `packages/openai` | `nanoharness-openai` |
+| `packages/gemini` | `nanoharness-gemini` |
 | `packages/fs` | `nanoharness-fs` |
 
 ## Pull requests
@@ -33,4 +34,4 @@ Keep them focused, update the README if behaviour changes, and add a line under 
 
 ## Releasing (maintainers)
 1. Bump the version in the package's `package.json` and finish the `CHANGELOG.md` entry.
-2. Tag and push: `v<version>` for the core, `anthropic-v<version>`, `openai-v<version>` or `fs-v<version>` for a companion package. The publish workflow builds, tests and publishes with provenance, using npm trusted publishing.
+2. Tag and push: `v<version>` for the core, `anthropic-v<version>`, `openai-v<version>`, `gemini-v<version>` or `fs-v<version>` for a companion package. The publish workflow builds, tests and publishes with provenance, using npm trusted publishing.

@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { run, defineTool, openaiCompatible, anthropicCompatible, withRetry, limitConcurrency, AdapterError } from "../dist/index.js";
+import { run, defineTool, openaiCompatible, anthropicCompatible, geminiCompatible, withRetry, limitConcurrency, AdapterError } from "../dist/index.js";
 
 const add = defineTool({ name: "add", description: "Add", schema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => a + b });
 const json = (v, status = 200) => new Response(JSON.stringify(v), { status, headers: { "content-type": "application/json" } });
@@ -87,5 +87,28 @@ test("streaming from a real local server with the global fetch, core only", asyn
   } finally {
     server.close();
     server.closeAllConnections?.();
+  }
+});
+
+test("geminiCompatible works with only the core, and a Gemini signature never reaches another provider", async () => {
+  const sent = [];
+  const replies = [
+    { candidates: [{ content: { parts: [{ functionCall: { name: "add", args: { a: 2, b: 3 } }, thoughtSignature: "sig" }] }, finishReason: "STOP" }] },
+    { candidates: [{ content: { parts: [{ text: "5" }] }, finishReason: "STOP" }] },
+  ];
+  const adapter = geminiCompatible({ baseUrl: "https://gemini.example.com/v1beta", model: "g", apiKey: "k", fetch: async (url, init) => (sent.push({ url, body: init.body }), json(replies.shift())) });
+  const r = await run({ adapter, prompt: "2+3?", tools: [add] });
+  assert.equal(r.finalText, "5");
+  assert.equal(sent[0].url, "https://gemini.example.com/v1beta/models/g:generateContent");
+
+  // The same history continued with Anthropic and OpenAI: the signature is Gemini's only.
+  for (const make of [
+    (fetch) => anthropicCompatible({ baseUrl: "https://a.example.com", model: "m", fetch }),
+    (fetch) => openaiCompatible({ baseUrl: "https://o.example.com/v1", model: "m", fetch }),
+  ]) {
+    let body = "";
+    const reply = { content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", choices: [{ message: { content: "ok" }, finish_reason: "stop" }] };
+    await run({ adapter: make(async (_, init) => ((body = init.body), json(reply))), prompt: [...r.messages, { role: "user", content: "and?" }] });
+    assert.ok(!body.includes("sig"), body);
   }
 });
