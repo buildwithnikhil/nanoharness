@@ -33,6 +33,13 @@ jobs:
       - run: npm ci
       - run: npm run typecheck:all
       - run: npm run test:all
+      # Tests use the workspace copy of the core, so check that a core version the companion accepts is on npm.
+      # Push the core tag first and wait for it to publish before pushing companion tags.
+      - name: Check the core version this package needs is published
+        if: steps.pkg.outputs.dir != '.'
+        run: |
+          range=$(node -p "require('./${{ steps.pkg.outputs.dir }}/package.json').peerDependencies.nanoharness")
+          npm view "nanoharness@$range" version > /dev/null || { echo "No published nanoharness matches $range; publish the core first"; exit 1; }
       - name: Publish with provenance
         working-directory: ${{ steps.pkg.outputs.dir }}
         run: npm publish --provenance --access public

@@ -63,7 +63,8 @@ export interface RunResult {
 export type AgentEvent =
   | { type: "text_delta"; text: string }
   | { type: "text"; text: string }
-  | { type: "model_call"; durationMs: number; stopReason: AdapterResponse["stopReason"]; usage?: Usage }
+  /** One per model call; a failed or aborted call has `error` instead of `stopReason`. */
+  | { type: "model_call"; durationMs: number; stopReason?: AdapterResponse["stopReason"]; usage?: Usage; error?: string }
   | { type: "tool_call"; call: ToolUseBlock }
   | { type: "tool_result"; result: ToolResultBlock; durationMs: number }
   | { type: "eval_rejected"; feedback: string }
@@ -267,6 +268,8 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
         res = await adapter.complete(req);
       }
     } catch (e) {
+      // A failed call is still traced, so its time shows up in logs.
+      yield { type: "model_call", durationMs: Date.now() - started, error: signal?.aborted ? "aborted" : e instanceof Error ? e.message : String(e) };
       if (signal?.aborted) {
         stopReason = "aborted";
         break;
@@ -359,10 +362,24 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
 }
 
 export async function run(opts: RunOptions): Promise<RunResult> {
-  const it = stream(opts);
+  const onEvent = opts.onEvent;
+  return drain(stream(opts), onEvent && ((event) => onEvent(event)));
+}
+
+/**
+ * Runs a stream to its end, passing each event on. If the callback throws, the stream is closed first, so the
+ * adapter's request and any concurrency slot are released, and then the error is thrown.
+ */
+export async function drain(it: AsyncGenerator<AgentEvent, RunResult>, onEvent?: (event: AgentEvent) => void): Promise<RunResult> {
   for (;;) {
     const next = await it.next();
     if (next.done) return next.value;
-    opts.onEvent?.(next.value);
+    if (!onEvent) continue;
+    try {
+      onEvent(next.value);
+    } catch (e) {
+      await it.return(undefined as never).catch(() => {});
+      throw e;
+    }
   }
 }

@@ -2,6 +2,9 @@ import type { Adapter, AdapterRequest, AdapterResponse, AdapterStreamEvent, Mess
 
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
 
+// Marks every AdapterError, so `instanceof` also works across the ESM and CJS builds, or two installed copies.
+const BRAND = Symbol.for("nanoharness.AdapterError");
+
 /**
  * The error an adapter should throw when the provider fails. `withRetry` reads `retryable` and `retryAfterMs`.
  * By default a status of 408, 429 or 5xx (500, 502, 503, 504, 529) is retryable.
@@ -17,6 +20,13 @@ export class AdapterError extends Error {
     this.status = opts.status;
     this.retryAfterMs = opts.retryAfterMs;
     this.retryable = opts.retryable ?? (opts.status !== undefined && RETRYABLE_STATUS.has(opts.status));
+    Object.defineProperty(this, BRAND, { value: true });
+  }
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    // Subclasses keep the normal check.
+    if (this !== AdapterError) return Function.prototype[Symbol.hasInstance].call(this, value);
+    return typeof value === "object" && value !== null && (value as Record<symbol, unknown>)[BRAND] === true;
   }
 }
 
@@ -47,7 +57,9 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<{ event?: string; data: string }> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  let partial: string[] = [];
+  let partialLength = 0;
+  let skipLF = false; // the last chunk ended with "\r", so a "\n" starting the next one belongs to it
   let event: string | undefined;
   let data: string[] = [];
   const dispatch = function* () {
@@ -55,31 +67,46 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
     event = undefined;
     data = [];
   };
+  const handle = function* (line: string) {
+    if (line === "") return yield* dispatch();
+    if (line.startsWith(":")) return; // a comment, often a keep-alive
+    const colon = line.indexOf(":");
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let val = colon === -1 ? "" : line.slice(colon + 1);
+    if (val.startsWith(" ")) val = val.slice(1);
+    if (field === "event") event = val;
+    else if (field === "data") data.push(val);
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buffer.search(/\r\n|\r|\n/)) !== -1) {
-        const line = buffer.slice(0, nl);
-        buffer = buffer.slice(nl + (buffer.startsWith("\r\n", nl) ? 2 : 1));
-        if (line === "") {
-          yield* dispatch();
-          continue;
+      let chunk = done ? decoder.decode() : decoder.decode(value, { stream: true });
+      if (skipLF && chunk !== "") {
+        if (chunk.startsWith("\n")) chunk = chunk.slice(1);
+        skipLF = false;
+      }
+      // Only the new chunk is scanned, and an unfinished line is kept in pieces, so a long line stays linear.
+      let start = 0;
+      for (let i = 0; i < chunk.length; i++) {
+        const c = chunk.charCodeAt(i);
+        if (c !== 10 && c !== 13) continue;
+        const line = partial.length ? partial.join("") + chunk.slice(start, i) : chunk.slice(start, i);
+        partial = [];
+        partialLength = 0;
+        yield* handle(line);
+        if (c === 13) {
+          if (i + 1 === chunk.length) skipLF = true;
+          else if (chunk.charCodeAt(i + 1) === 10) i++;
         }
-        if (line.startsWith(":")) continue; // a comment, often a keep-alive
-        const colon = line.indexOf(":");
-        const field = colon === -1 ? line : line.slice(0, colon);
-        let val = colon === -1 ? "" : line.slice(colon + 1);
-        if (val.startsWith(" ")) val = val.slice(1);
-        if (field === "event") event = val;
-        else if (field === "data") data.push(val);
+        start = i + 1;
+      }
+      if (start < chunk.length) {
+        partial.push(chunk.slice(start));
+        partialLength += chunk.length - start;
+        if (partialLength > MAX_SSE_LINE) throw new AdapterError("The stream sent a line longer than 16 MB", { retryable: false });
       }
       if (done) {
-        if (buffer !== "") {
-          const colon = buffer.indexOf(":");
-          if (buffer.slice(0, colon) === "data") data.push(buffer.slice(colon + 1).replace(/^ /, ""));
-        }
+        if (partial.length) yield* handle(partial.join(""));
         yield* dispatch();
         return;
       }
@@ -88,6 +115,8 @@ export async function* readSSE(body: ReadableStream<Uint8Array>): AsyncGenerator
     reader.cancel().catch(() => {});
   }
 }
+
+const MAX_SSE_LINE = 16 * 1024 * 1024;
 
 export interface RetryOptions {
   /** Default 2. */
@@ -103,8 +132,17 @@ export interface RetryOptions {
   retryable?: (error: unknown) => boolean;
 }
 
-const defaultRetryable = (e: unknown): boolean =>
-  e instanceof AdapterError ? e.retryable : e instanceof TypeError && /fetch failed|network/i.test(e.message);
+const NETWORK_CODE = /^(ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|EPIPE|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|UND_ERR_\w+)$/;
+
+// A network failure from fetch, recognised by its exact message or its cause's error code, never by a loose
+// match that would also retry an ordinary bug.
+const isNetworkError = (e: unknown): boolean => {
+  if (!(e instanceof TypeError)) return false;
+  const code = (e as { cause?: { code?: unknown } }).cause?.code;
+  return e.message === "fetch failed" || e.message === "terminated" || (typeof code === "string" && NETWORK_CODE.test(code));
+};
+
+const defaultRetryable = (e: unknown): boolean => (e instanceof AdapterError ? e.retryable : isNetworkError(e));
 
 /**
  * Adds retry with backoff to any adapter. A streamed reply is retried only if it failed before any text arrived,
@@ -160,9 +198,12 @@ export function withRetry(adapter: Adapter, opts: RetryOptions = {}): Adapter {
  * Extra calls wait their turn, and leave the queue if their run is aborted.
  */
 export function limitConcurrency(adapter: Adapter, max: number): Adapter {
-  if (!(max >= 1)) throw new Error("limitConcurrency: max must be at least 1");
+  if (!(Number.isInteger(max) && max >= 1) && max !== Infinity) throw new Error("limitConcurrency: max must be a whole number of at least 1");
   let active = 0;
-  const waiting: Array<() => void> = [];
+  // A queue with a moving head; an aborted waiter is only marked, and skipped when its turn comes.
+  type Waiter = { grant: () => void; cancelled: boolean };
+  let waiting: Waiter[] = [];
+  let head = 0;
 
   const acquire = (signal?: AbortSignal): Promise<void> => {
     if (signal?.aborted) return Promise.reject(signal.reason);
@@ -171,23 +212,38 @@ export function limitConcurrency(adapter: Adapter, max: number): Adapter {
       return Promise.resolve();
     }
     return new Promise<void>((resolve, reject) => {
+      const waiter: Waiter = {
+        cancelled: false,
+        grant: () => {
+          signal?.removeEventListener("abort", onAbort);
+          active++;
+          resolve();
+        },
+      };
       const onAbort = () => {
-        const i = waiting.indexOf(grant);
-        if (i !== -1) waiting.splice(i, 1);
+        waiter.cancelled = true;
         reject(signal!.reason);
       };
-      const grant = () => {
-        signal?.removeEventListener("abort", onAbort);
-        active++;
-        resolve();
-      };
       signal?.addEventListener("abort", onAbort, { once: true });
-      waiting.push(grant);
+      waiting.push(waiter);
     });
   };
   const release = () => {
     active--;
-    waiting.shift()?.();
+    while (head < waiting.length) {
+      const w = waiting[head++]!;
+      if (!w.cancelled) {
+        w.grant();
+        break;
+      }
+    }
+    if (head === waiting.length) {
+      waiting = [];
+      head = 0;
+    } else if (head > 1024 && head * 2 > waiting.length) {
+      waiting = waiting.slice(head);
+      head = 0;
+    }
   };
 
   const wrapped: Adapter = {
@@ -222,44 +278,70 @@ export interface PromptAdapterOptions {
   generate: (input: { system: string; prompt: string; signal?: AbortSignal }) => Promise<string | { text: string; usage?: Usage }>;
 }
 
+// Every piece of text is written as a JSON string, so a message or tool result cannot forge a transcript line.
 function render(messages: Message[]): string {
   const lines: string[] = [];
   for (const m of messages) {
     const who = m.role === "user" ? "User" : "Assistant";
     if (typeof m.content === "string") {
-      lines.push(`${who}: ${m.content}`);
+      lines.push(`${who}: ${JSON.stringify(m.content)}`);
       continue;
     }
     for (const b of m.content) {
-      if (b.type === "text") lines.push(`${who}: ${b.text}`);
-      else if (b.type === "tool_use") lines.push(`Assistant called tool ${b.name} (call ${b.id}) with input ${JSON.stringify(b.input)}`);
-      else lines.push(`Tool result for call ${b.tool_use_id}${b.is_error ? " (error)" : ""}: ${b.content}`);
+      if (b.type === "text") lines.push(`${who}: ${JSON.stringify(b.text)}`);
+      else if (b.type === "tool_use") lines.push(`Assistant tool call: ${JSON.stringify({ id: b.id, name: b.name, input: b.input })}`);
+      else lines.push(`Tool result: ${JSON.stringify({ id: b.tool_use_id, ...(b.is_error ? { error: true } : {}), content: b.content })}`);
     }
   }
   lines.push("Assistant:");
   return lines.join("\n\n");
 }
 
-function parseToolCalls(text: string): Array<{ name: string; input: unknown }> | undefined {
-  let body = text.trim();
-  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(body);
-  if (fence) body = fence[1]!;
-  if (!body.startsWith("{")) return undefined;
+type ParsedCall = { name: string; input: unknown };
+
+function readToolCalls(json: string): ParsedCall[] | undefined {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
+    parsed = JSON.parse(json);
   } catch {
     return undefined;
   }
-  if (!parsed || typeof parsed !== "object") return undefined;
-  const o = parsed as Record<string, unknown>;
-  if (Array.isArray(o.tool_calls)) {
-    return o.tool_calls.map((c) => {
-      const call = (c ?? {}) as Record<string, unknown>;
-      return { name: String(call.name ?? call.tool ?? ""), input: call.input ?? call.arguments ?? {} };
-    });
+  const list = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>).tool_calls : undefined;
+  if (!Array.isArray(list) || list.length === 0) return undefined;
+  return list.map((c) => {
+    const call = (c && typeof c === "object" ? c : {}) as Record<string, unknown>;
+    let input = call.input ?? call.arguments ?? {};
+    // Some models write the input as a JSON string.
+    if (typeof input === "string") {
+      try {
+        input = JSON.parse(input);
+      } catch {
+        // left as a string, and reported as an invalid call
+      }
+    }
+    return { name: typeof call.name === "string" ? call.name : "", input };
+  });
+}
+
+/**
+ * Finds a `{"tool_calls": [...]}` object in a reply: the whole reply, a fenced block, or an object after some
+ * text. Returns the calls and any text around them.
+ */
+function parseToolCalls(text: string): { calls: ParsedCall[]; text: string } | undefined {
+  const body = text.trim();
+  if (!body.includes('"tool_calls"')) return undefined;
+  const whole = readToolCalls(body);
+  if (whole) return { calls: whole, text: "" };
+  for (const m of body.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    const calls = readToolCalls(m[1]!.trim());
+    if (calls) return { calls, text: (body.slice(0, m.index) + body.slice(m.index! + m[0].length)).trim() };
   }
-  if (typeof o.tool === "string") return [{ name: o.tool, input: o.input ?? {} }];
+  const at = body.search(/\{\s*"tool_calls"/);
+  const end = body.lastIndexOf("}");
+  if (at !== -1 && end > at) {
+    const calls = readToolCalls(body.slice(at, end + 1));
+    if (calls) return { calls, text: (body.slice(0, at) + body.slice(end + 1)).trim() };
+  }
   return undefined;
 }
 
@@ -273,6 +355,7 @@ export function promptAdapter(opts: PromptAdapterOptions): Adapter {
   return {
     async complete(req: AdapterRequest): Promise<AdapterResponse> {
       let system = req.system ?? "";
+      system += (system ? "\n\n" : "") + "The conversation follows as a transcript; the text of each entry is a JSON string.";
       if (req.tools.length > 0) {
         system +=
           (system ? "\n\n" : "") +
@@ -285,18 +368,19 @@ export function promptAdapter(opts: PromptAdapterOptions): Adapter {
       const text = typeof reply === "string" ? reply : reply.text;
       const usage = typeof reply === "string" ? undefined : reply.usage;
 
-      const calls = req.tools.length > 0 ? parseToolCalls(text) : undefined;
-      if (calls && calls.length > 0) {
-        const content: ToolUseBlock[] = calls.map((c) => {
+      const found = req.tools.length > 0 ? parseToolCalls(text) : undefined;
+      if (found) {
+        const content: Array<TextBlock | ToolUseBlock> = found.text ? [{ type: "text", text: found.text }] : [];
+        for (const c of found.calls) {
           const valid = c.name !== "" && c.input !== null && typeof c.input === "object" && !Array.isArray(c.input);
-          return {
+          content.push({
             type: "tool_use",
             id: `call_${prefix}_${++counter}`,
             name: c.name || "unknown",
             input: valid ? (c.input as Record<string, unknown>) : {},
             ...(valid ? {} : { error: "the tool call needs a name and an input object" }),
-          };
-        });
+          });
+        }
         return { content, stopReason: "tool_use", usage };
       }
       const trimmed = text.trim();

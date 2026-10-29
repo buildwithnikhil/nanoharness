@@ -251,19 +251,20 @@ test("promptAdapter gives a text-only model tool calling", async () => {
   assert.equal(r.finalText, "The answer is 6912.");
   assert.equal(r.stopReason, "end_turn");
   assert.deepEqual(r.usage, { inputTokens: 9, outputTokens: 4 });
-  assert.match(prompts[0].system, /^Be brief\.\n\nYou can use these tools/);
+  assert.match(prompts[0].system, /^Be brief\.\n\nThe conversation follows as a transcript[^\n]*\n\nYou can use these tools/);
   assert.match(prompts[0].system, /- add: Add/);
-  assert.match(prompts[1].prompt, /Tool result for call call_\w+: 6912/);
-  assert.match(prompts[1].prompt, /Assistant called tool add/);
+  assert.match(prompts[1].prompt, /^User: "What is 1234 \+ 5678\?"/);
+  assert.match(prompts[1].prompt, /Tool result: \{"id":"call_\w+","content":"6912"\}/);
+  assert.match(prompts[1].prompt, /Assistant tool call: \{"id":"call_\w+","name":"add","input":\{"a":1234,"b":5678\}\}/);
   assert.match(prompts[1].prompt, /Assistant:$/);
 });
 
-test("promptAdapter accepts fenced JSON and the single-call form, and flags malformed calls", async () => {
+test("promptAdapter accepts fenced JSON, ignores a bare `tool` object, and flags malformed calls", async () => {
   const one = (reply) => promptAdapter({ generate: async () => reply }).complete({ messages: [{ role: "user", content: "x" }], tools: [{ name: "t", description: "", input_schema: { type: "object" } }] });
   const fenced = await one('```json\n{"tool_calls": [{"name": "t", "input": {"k": 1}}]}\n```');
   assert.deepEqual([fenced.stopReason, fenced.content[0].name, fenced.content[0].input], ["tool_use", "t", { k: 1 }]);
   const single = await one('{"tool": "t", "input": {"k": 2}}');
-  assert.deepEqual(single.content[0].input, { k: 2 });
+  assert.equal(single.stopReason, "end_turn", "only the documented tool_calls form is a call");
   const bad = await one('{"tool_calls": [{"name": "t", "input": [1, 2]}, {"input": {}}]}');
   assert.equal(bad.content.length, 2);
   assert.ok(bad.content.every((b) => b.error), "both malformed calls are flagged");
@@ -284,7 +285,7 @@ test("promptAdapter: a flagged call is not run and the model is told", async () 
   const model = async ({ prompt }) => (prompts.push(prompt), prompts.length === 1 ? '{"tool_calls": [{"name": "t", "input": "oops"}]}' : "ok");
   await run({ adapter: promptAdapter({ generate: model }), prompt: "x", tools: [t] });
   assert.equal(ran, 0);
-  assert.match(prompts[1], /\(error\): Invalid tool call/);
+  assert.match(prompts[1], /Tool result: \{"id":"call_\w+","error":true,"content":"Invalid tool call/);
 });
 
 // ---------------- checkStore

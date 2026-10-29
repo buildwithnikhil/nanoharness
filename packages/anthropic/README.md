@@ -29,11 +29,11 @@ const { finalText } = await run({
 
 Both `complete` and `stream` are supported. Pass `streaming: true` to `run`, `stream` or `defineAgent` to receive `text_delta` events as text arrives.
 
-A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `status`, `retryable`, and `retryAfterMs` when the server sent one. The adapter already retries on its own (`maxRetries`); to add jittered backoff on top, or to share a rate limit across agents, wrap it:
+A failed request throws an `AdapterError` (from `nanoharness`) with the HTTP `status`, `retryable`, and `retryAfterMs` when the server sent one. The adapter retries on its own (`maxRetries`). To use jittered backoff or share a rate limit across agents instead, turn that off and wrap it, with `withRetry` outside:
 
 ```ts
 import { limitConcurrency, withRetry } from "nanoharness";
-const adapter = limitConcurrency(withRetry(anthropic({ ... })), 4);
+const adapter = withRetry(limitConcurrency(anthropic({ ..., maxRetries: 0 }), 4));
 ```
 
 Needs `nanoharness` 2.1 or later.

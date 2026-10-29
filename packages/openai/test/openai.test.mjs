@@ -278,3 +278,31 @@ test("streaming over real HTTP: deltas arrive while the server is still sending"
     assert.ok(arrivals[2] < lastSentAt, `last delta arrived ${arrivals[2] - lastSentAt}ms relative to the final chunk being sent`);
   } finally { server.close(); server.closeAllConnections?.(); }
 });
+
+test("streaming: tool calls sent whole without `index` stay separate (some compatible servers)", async () => {
+  const lastOf = async (list) => {
+    const adapter = openai({ model: "m", fetch: async () => chunks(list) });
+    let last;
+    for await (const e of adapter.stream({ messages: [{ role: "user", content: "x" }], tools: [] })) last = e;
+    return last.response.content;
+  };
+  const want = [
+    { type: "tool_use", id: "a", name: "f", input: { x: 1 } },
+    { type: "tool_use", id: "b", name: "g", input: { y: 2 } },
+  ];
+  assert.deepEqual(await lastOf([
+    delta({ tool_calls: [{ id: "a", function: { name: "f", arguments: '{"x":1}' } }] }),
+    delta({ tool_calls: [{ id: "b", function: { name: "g", arguments: '{"y":2}' } }] }),
+    delta({}, "tool_calls"), "[DONE]",
+  ]), want);
+  assert.deepEqual(await lastOf([
+    delta({ tool_calls: [{ id: "a", function: { name: "f", arguments: '{"x":1}' } }, { id: "b", function: { name: "g", arguments: '{"y":2}' } }] }),
+    delta({}, "tool_calls"), "[DONE]",
+  ]), want);
+  // Without index or a new id, a piece continues the last call.
+  assert.deepEqual(await lastOf([
+    delta({ tool_calls: [{ id: "a", function: { name: "f", arguments: '{"x"' } }] }),
+    delta({ tool_calls: [{ function: { arguments: ":1}" } }] }),
+    delta({}, "tool_calls"), "[DONE]",
+  ]), [want[0]]);
+});
