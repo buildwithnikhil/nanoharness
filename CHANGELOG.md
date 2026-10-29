@@ -1,37 +1,59 @@
 # Changelog
 
-All notable changes are listed here. This project follows [semantic versioning](https://semver.org). The companion packages (`nanoharness-anthropic`, `nanoharness-openai`, `nanoharness-fs`) are versioned on their own and are listed under the core release they first shipped with.
+All notable changes are listed here, in the style of [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). This project follows [semantic versioning](https://semver.org). The companion packages (`nanoharness-anthropic`, `nanoharness-openai`, `nanoharness-gemini`, `nanoharness-fs`) are versioned on their own and are listed under the core release they first shipped with.
 
-## 2.1.0 (unreleased)
+## [Unreleased] (2.1.0)
 
-Everything here is opt-in and adds no dependencies. The core still never uses the network or the filesystem by itself. Released together with `nanoharness-anthropic` 1.1.0, `nanoharness-openai` 1.1.0 (streaming and `AdapterError`) and the new `nanoharness-gemini` 1.0.0; publish the core first, since all three need it.
+Everything here is opt-in and adds no dependencies. The core still never uses the network or the filesystem by itself. Released together with `nanoharness-anthropic` 1.1.0, `nanoharness-openai` 1.1.0, the new `nanoharness-gemini` 1.0.0 and `nanoharness-fs` 1.0.1; publish the core first, since all three need it.
 
 ### Added
-- **Streaming.** `streaming: true` on `run`, `stream` and `defineAgent` uses the adapter's new optional `stream` method and emits `text_delta` events. `nanoharness-anthropic` and `nanoharness-openai` both stream.
-- **Google Gemini.** `geminiCompatible` in the core and the new `nanoharness-gemini` package support the Gemini API and Vertex AI: tool calls with the full JSON Schema, streaming, thinking-token usage, and thought signatures kept with each tool call (a new optional `signature` field on `ToolUseBlock`) and sent back, as Gemini's thinking models require.
-- **The core works on its own.** `openaiCompatible({ baseUrl, model, fetch })` and `anthropicCompatible(...)` connect to any server that speaks the OpenAI Chat Completions or the Anthropic Messages format: Ollama, vLLM, LM Studio, OpenRouter, a gateway, or your own. You pass the `fetch`, so the core still never uses the network by itself. Options include `apiKey`, extra `headers`, `name` for error messages, and `allowInsecureHttp` for a LAN server. The companion packages are now thin wrappers that fill in the official URL and the global `fetch`; their options and behaviour are unchanged, and both gain `headers`.
+- **The core works on its own.** `openaiCompatible`, `anthropicCompatible` and `geminiCompatible` connect to any server that speaks the OpenAI Chat Completions, Anthropic Messages or Gemini format: OpenAI, Anthropic, Gemini, Vertex AI, Ollama, vLLM, LM Studio, OpenRouter, a gateway, or your own. You pass the `fetch` and `baseUrl`, so the core still never uses the network by itself. Options include `apiKey`, extra `headers`, `name` for error messages, and `allowInsecureHttp` for a LAN server. `HttpOptions` is the shared options type.
+- **Google Gemini.** The new `nanoharness-gemini` package (Gemini API and Vertex AI): tool calls with the full JSON Schema, streaming, thinking-token usage, and thought signatures kept with each tool call and sent back, as Gemini's thinking models require.
+- **Reasoning blocks.** A new `reasoning` content block keeps a model's reasoning (Anthropic's `thinking` and `redacted_thinking`) in the history and sends it back unchanged to the provider that wrote it, as Claude requires with tool results. Other providers leave it out. `stripReasoning` removes them, and sessions do so when they trim history. `ToolUseBlock` gains an optional `signature` (Gemini).
+- **Streaming.** `streaming: true` on `run`, `stream` and `defineAgent` uses the adapter's new optional `stream` method and emits `text_delta` events. All three official adapters stream.
 - **Custom models.**
   - `promptAdapter({ generate })` gives tool calling to any text-in, text-out model. The transcript it sends writes each message as a JSON string, so tool output cannot pose as a user turn.
   - `defineAdapter` types a hand-written adapter.
   - `readSSE` reads a streaming (Server-Sent Events) response.
-  - `AdapterError` carries the HTTP status, whether to retry, and `retryAfterMs`. Both official adapters now throw it, and `instanceof` works across the ESM and CJS builds.
-- **Scaling helpers.**
-  - `limitConcurrency(adapter, n)` caps calls in flight across all runs and agents.
-  - `withRetry(adapter, opts)` adds retry with jittered backoff to any adapter.
+  - `AdapterError` carries the HTTP status, whether to retry, and `retryAfterMs`. The official adapters throw it, and `instanceof` works across the ESM and CJS builds.
+- **Scaling helpers.** `limitConcurrency(adapter, n)` caps calls in flight across all runs and agents; `withRetry(adapter, opts)` adds retry with jittered backoff to any adapter.
 - **Long conversations.** `session(store, id, { maxMessages, summarize })` keeps a session's history bounded, cutting at a safe point and optionally keeping a summary of what was dropped. `trimHistory` is the same as a plain function.
-- **Tracing.**
-  - `onEvent` on `run()`.
-  - A `model_call` event after every model call, with `durationMs`, `usage` and `stopReason`, or `error` when the call failed or was aborted.
-  - `tool_result` events now carry `durationMs`.
+- **Tracing.** `onEvent` on `run()` (an async callback is awaited); a `model_call` event after every model call, with `durationMs`, `usage` and `stopReason`, or `error` when the call failed or was aborted; `durationMs` on `tool_result` events.
 - **Custom stores.** `checkStore(store)` checks a store you wrote. The README has a Redis example.
-- `Adapter.stream`, `AdapterStreamEvent` and `RunOptions.streaming` / `onEvent` in the types.
+- Types: `Adapter.stream`, `AdapterStreamEvent`, `ReasoningBlock`, `RunOptions.streaming` / `onEvent`, `Budget`, `Session`, `Graph`, `HttpOptions`.
 
 ### Changed
-- `stream()` (and `onEvent`) now also emits `model_call` events. Code that compares the exact sequence of events will see the new event; code that switches on `ev.type` is unaffected.
+- **New stop reason `refusal`.** A provider's refusal, content filter or safety stop now ends the run with `stopReason: "refusal"` (and runs no tool it asked for) instead of looking like a normal answer. Anthropic's `model_context_window_exceeded` is reported as `max_tokens`.
+- **Event and stop-reason unions grew.** `AgentEvent` gains `text_delta` and `model_call`, and `StopReason` / `AdapterStopReason` gain `refusal`. Code that compares the exact sequence of events sees the new events, and an exhaustive `switch` with a `never` default stops compiling until it handles them (or gets a `default` case). These unions can grow in minor releases. Hand-built `tool_result` events need `durationMs`.
+- `parallel()` now throws when given a list of inputs whose length differs from the number of agents (it used to give the extra agents an empty prompt).
+- An agent's `onEvent` is awaited when it returns a promise, and if it throws or rejects the run stops and the error is thrown.
+- Adapters receive a copy of the history rather than the live array.
+- `nanoharness-anthropic`: `maxTokens` defaults to 16,000 (was 4,096), since thinking counts toward it. `nanoharness-openai`: `maxTokensParam` defaults to `max_completion_tokens` for OpenAI itself (still `max_tokens` when `baseUrl` is set). Both companions are now thin wrappers over the core adapters and gain `headers` (and `allowInsecureHttp` for Anthropic and Gemini). They need `nanoharness` 2.1 or later. `nanoharness-fs` 1.0.1 only changes its error messages (below).
+- The CJS build shares one chunk across entry points, as the ESM build does, so in-process locks are shared between `nanoharness/store` and `nanoharness/graph`.
+- The zod peer range is `^4` (was `>=4`); zod 3 now gets a clear error.
 - The description no longer calls the package "for small apps".
-- `nanoharness-anthropic` and `nanoharness-openai` 1.1.0 need `nanoharness` 2.1 or later. `nanoharness-fs` is unchanged (still 1.0.0).
 
-## 2.0.0 (2026-10-28)
+### Fixed
+- `uniqueItems` rejected any array longer than 257 items as "nested too deeply".
+- The subpath types (`nanoharness/agents`, `/graph`, `/store`, `/zod`) did not resolve with TypeScript's `node10` module resolution; `typesVersions` now covers them.
+- A custom header written in a different case (`Authorization`) was sent next to the default instead of replacing it.
+- A connection dropped while reading a whole reply was reported as invalid JSON and never retried.
+- A reply with the wrong shape (`null`, `{}`, a gateway's error object) threw a raw `TypeError`; it is now an `AdapterError` that keeps the provider's message.
+- `checkStore` could hang when the store's `delete()` hung, and could keep writing after it timed out.
+- `withRetry` did not retry errors from the other module build, and retried ordinary bugs whose message mentioned "network".
+- `readSSE` mis-read a CRLF split across chunks, dropped a bare `data` line at the end, and was quadratic on long lines.
+- An OpenAI-compatible stream that sends tool calls without `index` merged them into one.
+- `markUntrusted` accepted a tag that broke its pattern; it now checks the tag.
+- Anthropic usage left out cached input (`cache_read_input_tokens`, `cache_creation_input_tokens`), so `inputTokens` was far too low with prompt caching.
+- `promptAdapter` showed earlier tool calls in a different form from the one the model is asked to use, and some models copied it instead of calling the tool.
+- `nanoharness-fs` 1.0.1: file errors showed the model the absolute path on disk; they now name only the path the model asked for.
+
+### Security
+- A whole reply is read up to 64 MB, so a misbehaving server cannot exhaust memory.
+- Built-in retries use jittered backoff and treat the same statuses as retryable as `AdapterError` (408, 429, 500, 502, 503, 504, 529).
+- The publish workflow runs in an `npm-publish` environment, publishes only tags on `main`, pins actions to commit SHAs, and refuses a companion whose required core version is not on npm. CI gains Node 26, `publint` and `arethetypeswrong` checks, and Dependabot.
+
+## [2.0.0] - 2026-10-28
 
 The core package no longer contains any network or filesystem code. The Anthropic adapter and the file tools moved into companion packages, so `nanoharness` itself has no `fetch`, no `fs` and no URLs. This is a breaking release.
 
@@ -116,7 +138,7 @@ Four reviewers each read the code with a different focus and reported only bugs 
 - `maxToolResultChars` output is now shorter than before for the same limit, because the marker counts toward it.
 - Schemas that used the keywords listed above now reject input that 1.x let through. That is the intent.
 
-## 1.3.0 (2026-10-23)
+## [1.3.0] - 2026-10-23
 
 Multi-agent hardening, found by auditing how agents behave together.
 
@@ -133,7 +155,7 @@ Multi-agent hardening, found by auditing how agents behave together.
 - The Anthropic adapter retries 429 and 5xx responses with backoff (`maxRetries`, default 2).
 - `read_file` refuses files over `maxFileBytes` (default 1,000,000).
 
-## 1.2.0 (2026-10-23)
+## [1.2.0] - 2026-10-23
 
 ### Added
 - **Multi-agent orchestration**, `nanoharness/agents`: `defineAgent` (an agent can be given to another agent as a tool with `asTool`), `pipeline`, `parallel` and `createPlanTool`.
@@ -143,10 +165,17 @@ Multi-agent hardening, found by auditing how agents behave together.
 
 (Version 1.1.0 was not published. Its guardrails shipped in 1.2.0.)
 
-## 1.0.1 (2026-10-23)
+## [1.0.1] - 2026-10-23
 
 - Published from GitHub Actions with signed provenance, and the repository link in `package.json` now resolves.
 
-## 1.0.0 (2026-10-23)
+## [1.0.0] - 2026-10-23
 
 First release: the tool-use loop (`run` and `stream`), `defineTool` with JSON Schema validation, the Anthropic adapter, sandboxed file tools at `nanoharness/tools-fs`, and optional Zod support at `nanoharness/zod`. ESM and CJS builds, no runtime dependencies.
+
+[Unreleased]: https://github.com/buildwithnikhil/nanoharness/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/buildwithnikhil/nanoharness/compare/v1.3.0...v2.0.0
+[1.3.0]: https://github.com/buildwithnikhil/nanoharness/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/buildwithnikhil/nanoharness/compare/v1.0.1...v1.2.0
+[1.0.1]: https://github.com/buildwithnikhil/nanoharness/compare/v1.0.0...v1.0.1
+[1.0.0]: https://github.com/buildwithnikhil/nanoharness/releases/tag/v1.0.0

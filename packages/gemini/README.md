@@ -23,6 +23,7 @@ const { finalText } = await run({ adapter, prompt: "Say hi in one word." });
 | `maxTokens` | Sent as `generationConfig.maxOutputTokens`. |
 | `temperature` | Sent only when set. |
 | `maxRetries` | Retries for HTTP 408, 429, 500, 502, 503 and 504, with backoff that honours `retry-after`. Default `2`. |
+| `allowInsecureHttp` | Allows plain `http` to a non-localhost host, such as a gateway on your LAN. Off by default. |
 | `fetch` | A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. |
 
 ## Vertex AI

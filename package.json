@@ -59,6 +59,22 @@
     },
     "./package.json": "./package.json"
   },
+  "typesVersions": {
+    "*": {
+      "zod": [
+        "./dist/zod.d.ts"
+      ],
+      "agents": [
+        "./dist/agents.d.ts"
+      ],
+      "graph": [
+        "./dist/graph.d.ts"
+      ],
+      "store": [
+        "./dist/store.d.ts"
+      ]
+    }
+  },
   "files": [
     "dist",
     "README.md",
@@ -99,7 +115,7 @@
     "provenance": true
   },
   "peerDependencies": {
-    "zod": ">=4"
+    "zod": "^4"
   },
   "peerDependenciesMeta": {
     "zod": {

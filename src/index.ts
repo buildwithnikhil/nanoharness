@@ -7,6 +7,6 @@ export { allowTools, markUntrusted } from "./policy.js";
 export { validate } from "./validate.js";
 export { AdapterError, defineAdapter, limitConcurrency, promptAdapter, readSSE, withRetry } from "./adapter-kit.js";
 export type { PromptAdapterOptions, RetryOptions } from "./adapter-kit.js";
-export { trimHistory } from "./history.js";
+export { stripReasoning, trimHistory } from "./history.js";
 export { anthropicCompatible, geminiCompatible, openaiCompatible } from "./providers.js";
-export type { AnthropicCompatibleOptions, GeminiCompatibleOptions, OpenAICompatibleOptions } from "./providers.js";
+export type { AnthropicCompatibleOptions, GeminiCompatibleOptions, HttpOptions, OpenAICompatibleOptions } from "./providers.js";

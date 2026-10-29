@@ -27,6 +27,7 @@ export interface Tool<I = any> {
   run: (input: I, ctx: ToolContext) => unknown | Promise<unknown>;
 }
 
+/** Defines a tool: its name, a description for the model, a JSON Schema for its input, and the function to run. */
 export function defineTool<I = Record<string, unknown>>(tool: Tool<I>): Tool<I> {
   return tool;
 }

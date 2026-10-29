@@ -1,22 +1,26 @@
 import { AdapterError, readSSE, sleep } from "./adapter-kit.js";
-import type { Adapter, AdapterRequest, AdapterResponse, AdapterStopReason, ContentBlock, Message, TextBlock, ToolUseBlock, Usage } from "./types.js";
+import type { Adapter, AdapterRequest, AdapterResponse, AdapterStopReason, ContentBlock, Message, ReasoningBlock, TextBlock, ToolUseBlock, Usage } from "./types.js";
 
 // Adapters for any server that speaks the OpenAI Chat Completions or the Anthropic Messages format: OpenAI,
 // Anthropic, Ollama, vLLM, LM Studio, OpenRouter, a gateway, or your own model server. You pass the `fetch` and
 // the `baseUrl`, so the core itself never reaches for the network on its own. `nanoharness-openai` and
 // `nanoharness-anthropic` are these same adapters with the official URLs and the global `fetch` filled in.
 
-interface HttpOptions {
+/** Options shared by `openaiCompatible`, `anthropicCompatible` and `geminiCompatible`. */
+export interface HttpOptions {
   /** Base URL of the API. Must be https, or http on localhost (see `allowInsecureHttp`). */
   baseUrl: string;
   /** The `fetch` to send requests with: usually the global `fetch`, or one for a proxy or tests. */
   fetch: typeof fetch;
   /** The model name, as the server knows it. */
   model: string;
+  /** Sent in the provider's own header. Optional, since local servers often need none. */
   apiKey?: string;
   /** Extra headers on every request, e.g. for a gateway. They can replace the default ones. */
   headers?: Record<string, string>;
+  /** Most tokens the model may write in one reply. */
   maxTokens?: number;
+  /** Sampling temperature, sent only when set. Some current models reject it. */
   temperature?: number;
   /** Retries for rate limits and server errors, with backoff that honours `retry-after`. Default 2. */
   maxRetries?: number;
@@ -42,7 +46,7 @@ export interface AnthropicCompatibleOptions extends HttpOptions {
   baseUrl: string;
   /** Sent as the `x-api-key` header. */
   apiKey?: string;
-  /** Default 4096; the Messages format requires a limit. */
+  /** Default 16,000 (thinking counts toward it); the Messages format requires a limit. */
   maxTokens?: number;
   /** The `anthropic-version` header. Default "2023-06-01". */
   version?: string;
@@ -56,8 +60,12 @@ function retryDelayMs(header: string | null, attempt: number): number {
     const at = Date.parse(header);
     if (!Number.isNaN(at)) return Math.max(0, at - Date.now());
   }
-  return 500 * 2 ** attempt;
+  // Jitter keeps parallel agents from retrying in lockstep.
+  return 500 * 2 ** attempt * (0.5 + Math.random() * 0.5);
 }
+
+// The same statuses AdapterError treats as retryable by default (529 is Anthropic's "overloaded").
+const RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
 
 const ERROR_BODY_LIMIT = 1000;
 
@@ -107,8 +115,32 @@ function mergeHeaders(defaults: Record<string, string>, extra: Record<string, st
 
 // Reads a JSON body. A connection dropped while reading stays a network error (so withRetry can retry it); only
 // a body that is not JSON, or not an object, becomes "invalid JSON".
+// A whole (non-streamed) reply is read up to this size, so a misbehaving server cannot exhaust memory.
+const MAX_BODY = 64 * 1024 * 1024;
+
+async function readText(name: string, res: Response): Promise<string> {
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const parts: string[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY) throw new AdapterError(`${name} sent a reply larger than 64 MB`, { retryable: false });
+      parts.push(decoder.decode(value, { stream: true }));
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  parts.push(decoder.decode());
+  return parts.join("");
+}
+
 async function readJson(name: string, res: Response): Promise<Record<string, unknown>> {
-  const text = await res.text();
+  const text = await readText(name, res);
   let data: unknown;
   try {
     data = JSON.parse(text);
@@ -170,13 +202,12 @@ function toolBlock(id: string, name: string, json: string): ToolUseBlock {
 
 // ---------------------------------------------------------------- OpenAI Chat Completions format
 
-const OPENAI_RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
-
 const OPENAI_STOP: Record<string, AdapterStopReason> = {
   stop: "end_turn",
   tool_calls: "tool_use",
   function_call: "tool_use",
   length: "max_tokens",
+  content_filter: "refusal",
 };
 
 type OpenAIMessage =
@@ -216,7 +247,9 @@ function toOpenAIMessages(system: string | undefined, messages: Message[]): Open
 }
 
 // Builds the harness response from text and tool calls, the same way for a whole reply and a streamed one.
-function assemble(text: string, calls: Array<{ id: string; name: string; args: string }>, finish: string | undefined, usage?: Usage): AdapterResponse {
+// A refusal comes back as its own field; its text is kept as the answer and the stop reason says it was a refusal.
+function assemble(text: string, calls: Array<{ id: string; name: string; args: string }>, finish: string | undefined, usage?: Usage, refusal = ""): AdapterResponse {
+  if (refusal) return { content: [{ type: "text", text: refusal }], stopReason: "refusal", ...(usage ? { usage } : {}) };
   const content: Array<TextBlock | ToolUseBlock> = [];
   if (text) content.push({ type: "text", text });
   // A malformed call is flagged, not run with an empty input: the harness reports it to the model instead.
@@ -239,7 +272,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
   const name = opts.name ?? "OpenAI-compatible API";
   if (!opts.model) throw new Error(`${name}: model is required`);
   const url = endpoint(name, opts.baseUrl, "/chat/completions", opts.allowInsecureHttp ?? false);
-  const request = requester(name, opts, url, opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}, OPENAI_RETRYABLE);
+  const request = requester(name, opts, url, opts.apiKey ? { authorization: `Bearer ${opts.apiKey}` } : {}, RETRYABLE);
 
   const body = (req: AdapterRequest, stream: boolean) =>
     JSON.stringify({
@@ -257,7 +290,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
     async complete(req): Promise<AdapterResponse> {
       const res = await request(body(req, false), req.signal);
       const data = (await readJson(name, res)) as {
-        choices?: { message?: { content?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string }[];
+        choices?: { message?: { content?: string | null; refusal?: string | null; tool_calls?: { id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string }[];
         usage?: { prompt_tokens: number; completion_tokens: number };
         error?: { message?: string };
       };
@@ -270,6 +303,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
         calls,
         choice.finish_reason,
         data.usage && { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens },
+        typeof choice.message.refusal === "string" ? choice.message.refusal : "",
       );
     },
 
@@ -277,6 +311,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
       const res = await request(body(req, true), req.signal);
       if (!res.body) throw new AdapterError(`${name} returned an empty stream`);
       let text = "";
+      let refusal = "";
       let finish: string | undefined;
       let usage: Usage | undefined;
       let done = false;
@@ -287,7 +322,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
           break;
         }
         let chunk: {
-          choices?: { delta?: { content?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
+          choices?: { delta?: { content?: string | null; refusal?: string | null; tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[] }; finish_reason?: string | null }[];
           usage?: { prompt_tokens: number; completion_tokens: number } | null;
           error?: { message?: string };
         };
@@ -304,6 +339,7 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
           text += choice.delta.content;
           yield { type: "text_delta", text: choice.delta.content };
         }
+        if (choice.delta?.refusal) refusal += choice.delta.refusal;
         for (const tc of choice.delta?.tool_calls ?? []) {
           // Some compatible servers leave out `index` and send each call whole: a new id starts a new call.
           let slot = tc.index;
@@ -319,30 +355,48 @@ export function openaiCompatible(opts: OpenAICompatibleOptions): Adapter {
         if (choice.finish_reason) finish = choice.finish_reason;
       }
       if (!done && finish === undefined) throw new AdapterError(`${name} stream ended early`, { retryable: false });
-      yield { type: "response", response: assemble(text, calls.filter(Boolean), finish, usage) };
+      yield { type: "response", response: assemble(text, calls.filter(Boolean), finish, usage, refusal) };
     },
   };
 }
 
 // ---------------------------------------------------------------- Anthropic Messages format
 
-const ANTHROPIC_RETRYABLE = new Set([408, 429, 500, 502, 503, 504, 529]);
-
 const ANTHROPIC_STOP: Record<string, AdapterStopReason> = {
   end_turn: "end_turn",
-  refusal: "end_turn",
   stop_sequence: "end_turn",
   tool_use: "tool_use",
   max_tokens: "max_tokens",
+  // The context window filled up, so the reply is cut off.
+  model_context_window_exceeded: "max_tokens",
+  refusal: "refusal",
 };
 
+type AnthropicUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null };
+
+// Anthropic counts cached input apart from `input_tokens`; all three are input the model read.
+const anthropicInput = (u: AnthropicUsage) => (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
+
+// Thinking blocks must go back to the API complete and unmodified, in their place, with the tool results.
+const reasoning = (data: Record<string, unknown>): ReasoningBlock => ({
+  type: "reasoning",
+  provider: "anthropic",
+  data,
+  ...(typeof data.thinking === "string" && data.thinking ? { text: data.thinking } : {}),
+});
+
 // Send only the fields the API defines, so nothing an adapter or hook attached to a block reaches the provider.
-function cleanMessage(m: Message): Message {
+// Reasoning written by another provider is left out.
+function cleanMessage(m: Message): unknown {
   if (typeof m.content === "string") return m;
-  return {
-    role: m.role,
-    content: m.content.map((b) => (b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: b.input } : b)),
-  };
+  const content: unknown[] = [];
+  for (const b of m.content) {
+    if (b.type === "tool_use") content.push({ type: "tool_use", id: b.id, name: b.name, input: b.input });
+    else if (b.type === "reasoning") {
+      if (b.provider === "anthropic") content.push(b.data);
+    } else content.push(b);
+  }
+  return { role: m.role, content };
 }
 
 /** An adapter for any server that speaks the Anthropic Messages format. */
@@ -355,13 +409,13 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
     opts,
     url,
     { "anthropic-version": opts.version ?? "2023-06-01", ...(opts.apiKey ? { "x-api-key": opts.apiKey } : {}) },
-    ANTHROPIC_RETRYABLE,
+    RETRYABLE,
   );
 
   const body = (req: AdapterRequest, stream: boolean) =>
     JSON.stringify({
       model: opts.model,
-      max_tokens: opts.maxTokens ?? 4096,
+      max_tokens: opts.maxTokens ?? 16_000,
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
       system: req.system,
       messages: req.messages.map(cleanMessage),
@@ -375,36 +429,48 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
       const data = (await readJson(name, res)) as {
         content?: Array<TextBlock | ToolUseBlock | { type: string }>;
         stop_reason?: string;
-        usage?: { input_tokens: number; output_tokens: number };
+        usage?: AnthropicUsage;
         error?: { message?: string };
       };
       if (!Array.isArray(data.content)) throw new AdapterError(`${name} returned no content${data.error?.message ? `: ${data.error.message}` : ""}`);
+      const content: Array<TextBlock | ToolUseBlock | ReasoningBlock> = [];
+      for (const b of data.content) {
+        if (!b || typeof b !== "object") continue;
+        if (b.type === "text" || b.type === "tool_use") content.push(b as TextBlock | ToolUseBlock);
+        else if (b.type === "thinking" || b.type === "redacted_thinking") content.push(reasoning(b as Record<string, unknown>));
+      }
       return {
-        content: data.content.filter((b): b is TextBlock | ToolUseBlock => !!b && (b.type === "text" || b.type === "tool_use")),
+        content,
         stopReason: ANTHROPIC_STOP[data.stop_reason ?? ""] ?? "other",
-        usage: data.usage && {
-          inputTokens: data.usage.input_tokens,
-          outputTokens: data.usage.output_tokens,
-        },
+        usage: data.usage && { inputTokens: anthropicInput(data.usage), outputTokens: data.usage.output_tokens ?? 0 },
       };
     },
 
     async *stream(req) {
       const res = await request(body(req, true), req.signal);
       if (!res.body) throw new AdapterError(`${name} returned an empty stream`);
-      type Partial = { type: "text"; text: string } | { type: "tool_use"; id: string; name: string; json: string } | { type: "other" };
+      type Partial =
+        | { type: "text"; text: string }
+        | { type: "tool_use"; id: string; name: string; json: string }
+        | { type: "thinking"; thinking: string; signature: string }
+        | { type: "redacted_thinking"; data: string }
+        | { type: "other" };
       const blocks: Partial[] = [];
-      const usage: Usage = { inputTokens: 0, outputTokens: 0 };
+      // Usage arrives in message_start and is updated (field by field, cumulatively) by message_delta.
+      const raw: AnthropicUsage = {};
+      const merge = (u?: AnthropicUsage) => {
+        for (const [k, v] of Object.entries(u ?? {})) if (typeof v === "number") (raw as Record<string, number>)[k] = v;
+      };
       let stop = "";
       let finished = false;
       for await (const { data } of readSSE(res.body)) {
         let ev: {
           type?: string;
           index?: number;
-          message?: { usage?: { input_tokens?: number; output_tokens?: number } };
-          content_block?: { type?: string; text?: string; id?: string; name?: string };
-          delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
-          usage?: { input_tokens?: number; output_tokens?: number };
+          message?: { usage?: AnthropicUsage };
+          content_block?: { type?: string; text?: string; id?: string; name?: string; thinking?: string; signature?: string; data?: string };
+          delta?: { type?: string; text?: string; partial_json?: string; thinking?: string; signature?: string; stop_reason?: string };
+          usage?: AnthropicUsage;
           error?: { type?: string; message?: string };
         };
         try {
@@ -414,8 +480,7 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
         }
         const i = ev.index ?? 0;
         if (ev.type === "message_start") {
-          usage.inputTokens = ev.message?.usage?.input_tokens ?? 0;
-          usage.outputTokens = ev.message?.usage?.output_tokens ?? 0;
+          merge(ev.message?.usage);
         } else if (ev.type === "content_block_start") {
           const b = ev.content_block ?? {};
           blocks[i] =
@@ -423,7 +488,11 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
               ? { type: "text", text: b.text ?? "" }
               : b.type === "tool_use"
                 ? { type: "tool_use", id: b.id ?? "", name: b.name ?? "", json: "" }
-                : { type: "other" };
+                : b.type === "thinking"
+                  ? { type: "thinking", thinking: b.thinking ?? "", signature: b.signature ?? "" }
+                  : b.type === "redacted_thinking"
+                    ? { type: "redacted_thinking", data: b.data ?? "" }
+                    : { type: "other" };
         } else if (ev.type === "content_block_delta") {
           const b = blocks[i];
           if (ev.delta?.type === "text_delta" && b?.type === "text" && ev.delta.text) {
@@ -431,11 +500,14 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
             yield { type: "text_delta", text: ev.delta.text };
           } else if (ev.delta?.type === "input_json_delta" && b?.type === "tool_use") {
             b.json += ev.delta.partial_json ?? "";
+          } else if (ev.delta?.type === "thinking_delta" && b?.type === "thinking") {
+            b.thinking += ev.delta.thinking ?? "";
+          } else if (ev.delta?.type === "signature_delta" && b?.type === "thinking") {
+            b.signature += ev.delta.signature ?? "";
           }
         } else if (ev.type === "message_delta") {
           if (ev.delta?.stop_reason) stop = ev.delta.stop_reason;
-          if (ev.usage?.output_tokens !== undefined) usage.outputTokens = ev.usage.output_tokens;
-          if (ev.usage?.input_tokens !== undefined) usage.inputTokens = ev.usage.input_tokens;
+          merge(ev.usage);
         } else if (ev.type === "message_stop") {
           finished = true;
         } else if (ev.type === "error") {
@@ -445,11 +517,13 @@ export function anthropicCompatible(opts: AnthropicCompatibleOptions): Adapter {
         }
       }
       if (!finished) throw new AdapterError(`${name} stream ended early`, { retryable: false });
-      const content: Array<TextBlock | ToolUseBlock> = [];
+      const content: Array<TextBlock | ToolUseBlock | ReasoningBlock> = [];
       for (const b of blocks) {
         if (b?.type === "text" && b.text) content.push({ type: "text", text: b.text });
         else if (b?.type === "tool_use") content.push(toolBlock(b.id, b.name, b.json));
+        else if (b?.type === "thinking" || b?.type === "redacted_thinking") content.push(reasoning({ ...b }));
       }
+      const usage: Usage = { inputTokens: anthropicInput(raw), outputTokens: raw.output_tokens ?? 0 };
       yield { type: "response", response: { content, stopReason: ANTHROPIC_STOP[stop] ?? "other", usage } };
     },
   };
@@ -466,8 +540,6 @@ export interface GeminiCompatibleOptions extends HttpOptions {
   /** Sent as the `x-goog-api-key` header. For Vertex AI, leave it out and pass `headers: { authorization: "Bearer ..." }`. */
   apiKey?: string;
 }
-
-const GEMINI_RETRYABLE = new Set([408, 429, 500, 502, 503, 504]);
 
 type GeminiPart = {
   text?: string;
@@ -503,7 +575,7 @@ function toGeminiContents(messages: Message[]): GeminiContent[] {
           names.set(b.id, b.name);
           const id = b.id.startsWith(LOCAL_ID) ? {} : { id: b.id };
           parts.push({ functionCall: { ...id, name: b.name, args: b.input }, ...(b.signature ? { thoughtSignature: b.signature } : {}) });
-        } else {
+        } else if (b.type === "tool_result") {
           const id = b.tool_use_id.startsWith(LOCAL_ID) ? {} : { id: b.tool_use_id };
           const response = b.is_error ? { error: b.content } : { result: b.content };
           parts.push({ functionResponse: { ...id, name: names.get(b.tool_use_id) ?? "unknown", response } });
@@ -515,7 +587,18 @@ function toGeminiContents(messages: Message[]): GeminiContent[] {
   return out;
 }
 
-const GEMINI_STOP: Record<string, AdapterStopReason> = { STOP: "end_turn", MAX_TOKENS: "max_tokens" };
+const GEMINI_STOP: Record<string, AdapterStopReason> = {
+  STOP: "end_turn",
+  MAX_TOKENS: "max_tokens",
+  // Stopped by Google's safety and policy filters.
+  SAFETY: "refusal",
+  RECITATION: "refusal",
+  BLOCKLIST: "refusal",
+  PROHIBITED_CONTENT: "refusal",
+  SPII: "refusal",
+  IMAGE_SAFETY: "refusal",
+  IMAGE_PROHIBITED_CONTENT: "refusal",
+};
 
 function geminiUsage(u: GeminiChunk["usageMetadata"]): Usage | undefined {
   if (!u) return undefined;
@@ -531,8 +614,8 @@ export function geminiCompatible(opts: GeminiCompatibleOptions): Adapter {
   if (/[?#\s]/.test(model)) throw new Error(`${name}: invalid model "${opts.model}"`);
   const path = `/models/${encodeURI(model)}`;
   const headers: Record<string, string> = opts.apiKey ? { "x-goog-api-key": opts.apiKey } : {};
-  const once = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:generateContent`, opts.allowInsecureHttp ?? false), headers, GEMINI_RETRYABLE);
-  const streamed = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:streamGenerateContent?alt=sse`, opts.allowInsecureHttp ?? false), headers, GEMINI_RETRYABLE);
+  const once = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:generateContent`, opts.allowInsecureHttp ?? false), headers, RETRYABLE);
+  const streamed = requester(name, opts, endpoint(name, opts.baseUrl, `${path}:streamGenerateContent?alt=sse`, opts.allowInsecureHttp ?? false), headers, RETRYABLE);
   let counter = 0;
   const prefix = Math.random().toString(36).slice(2, 8);
 
@@ -564,13 +647,21 @@ export function geminiCompatible(opts: GeminiCompatibleOptions): Adapter {
   };
 
   const respond = (text: string, calls: ToolUseBlock[], finish: string | undefined, usage?: Usage): AdapterResponse => {
+    if (finish === "MISSING_THOUGHT_SIGNATURE") {
+      throw new AdapterError(`${name}: the history is missing a thought signature (Gemini needs the one sent with each earlier tool call)`, { retryable: false });
+    }
     const content: Array<TextBlock | ToolUseBlock> = [];
     if (text) content.push({ type: "text", text });
     content.push(...calls);
     return {
       content,
       // A call cut off by the token limit is incomplete, so MAX_TOKENS wins over tool calls.
-      stopReason: finish === "MAX_TOKENS" ? "max_tokens" : calls.length ? "tool_use" : (GEMINI_STOP[finish ?? ""] ?? "other"),
+      stopReason:
+        finish === "MAX_TOKENS" || GEMINI_STOP[finish ?? ""] === "refusal"
+          ? GEMINI_STOP[finish!]!
+          : calls.length
+            ? "tool_use"
+            : (GEMINI_STOP[finish ?? ""] ?? "other"),
       ...(usage ? { usage } : {}),
     };
   };

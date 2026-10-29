@@ -5,8 +5,9 @@ export interface AnthropicOptions {
   apiKey: string;
   /** Default "claude-sonnet-5-5". */
   model?: string;
-  /** Default 4096. */
+  /** Default 16,000. Thinking counts toward it. */
   maxTokens?: number;
+  /** Only for older models and compatible servers: current Claude models reject `temperature` with a 400. */
   temperature?: number;
   /** Where requests, and so the API key, are sent. Must be https (or http on localhost). Default https://api.anthropic.com. */
   baseUrl?: string;
@@ -14,6 +15,8 @@ export interface AnthropicOptions {
   fetch?: typeof fetch;
   /** Retries for rate limits and server errors (408, 429, 500, 502, 503, 504, 529), with backoff. Default 2. */
   maxRetries?: number;
+  /** Permits plain http to a non-localhost host, e.g. a gateway on your LAN. Off by default. */
+  allowInsecureHttp?: boolean;
   /** Extra headers on every request, e.g. a beta flag or a gateway header. */
   headers?: Record<string, string>;
 }

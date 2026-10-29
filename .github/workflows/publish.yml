@@ -13,9 +13,13 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A GitHub environment: add required reviewers to it (Settings > Environments) to approve each release.
+    environment: npm-publish
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0 # the main-branch check below needs history
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       - name: Pick the package from the tag
@@ -31,6 +35,9 @@ jobs:
           actual=$(node -p "require('./$dir/package.json').version")
           test "$ver" = "$actual" || { echo "Tag version $ver does not match $dir/package.json version $actual"; exit 1; }
           echo "dir=$dir" >> "$GITHUB_OUTPUT"
+      - name: Only publish tags on main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "The tag is not on main"; exit 1; }
       - run: npm ci
       - run: npm run typecheck:all
       - run: npm run test:all

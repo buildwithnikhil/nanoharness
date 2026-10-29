@@ -5,7 +5,8 @@ import { canonical, validate } from "./validate.js";
 
 export type Decision = "allow" | "deny" | { deny: string };
 
-export type StopReason = "end_turn" | "max_turns" | "max_tokens" | "aborted" | "eval_failed" | "budget_exceeded";
+/** Why a run ended. New reasons can be added in minor releases, so give an exhaustive switch a default case. */
+export type StopReason = "end_turn" | "max_turns" | "max_tokens" | "refusal" | "aborted" | "eval_failed" | "budget_exceeded";
 
 /** `true` accepts the answer; `false` or `{ feedback }` rejects it and asks the model to try again. */
 export type EvalResult = boolean | { feedback: string };
@@ -17,11 +18,16 @@ export interface ToolResultInfo {
 }
 
 export interface RunOptions {
+  /** The model to talk to, e.g. `anthropic(...)`, `openaiCompatible(...)` or your own adapter. */
   adapter: Adapter;
+  /** A user message, or a whole conversation to continue (it is not modified). */
   prompt: string | Message[];
   system?: string;
+  /** Tools the model may call. Default: none. */
   tools?: Tool[];
+  /** Most model calls in this run before it stops with `max_turns`. Default 20. */
   maxTurns?: number;
+  /** Aborts the run, including a model call or tool in progress; it then stops with `aborted`. */
   signal?: AbortSignal;
   /** Called before every tool runs. Anything but "allow" is reported to the model as an error. */
   onToolCall?: (call: ToolUseBlock) => Decision | Promise<Decision>;
@@ -213,6 +219,7 @@ async function dispatch(
   return stringify(await runTool(tool, input, opts, base));
 }
 
+/** Runs the tool-use loop and yields every event as it happens; the generator's return value is the result. */
 export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunResult> {
   const { adapter, signal, maxTurns = 20 } = opts;
   const tools = new Map<string, Tool>();
@@ -298,10 +305,16 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
       if (block.type === "text") {
         finalText += block.text;
         yield { type: "text", text: block.text };
-      } else {
+      } else if (block.type === "tool_use") {
         calls.push(block);
         yield { type: "tool_call", call: block };
-      }
+      } // reasoning stays in the history only
+    }
+
+    // A refusal is reported as such, never as an answer, and no tool it asked for is run.
+    if (res.stopReason === "refusal") {
+      stopReason = "refusal";
+      break;
     }
 
     if (calls.length === 0) {
@@ -364,6 +377,7 @@ export async function* stream(opts: RunOptions): AsyncGenerator<AgentEvent, RunR
   return result;
 }
 
+/** Runs the tool-use loop until the model answers, a limit is reached or the run is aborted. */
 export async function run(opts: RunOptions): Promise<RunResult> {
   const onEvent = opts.onEvent;
   return drain(stream(opts), onEvent && ((event) => onEvent(event)));

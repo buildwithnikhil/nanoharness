@@ -18,6 +18,8 @@ export interface GeminiOptions {
   fetch?: typeof fetch;
   /** Retries for 408, 429, 500, 502, 503 and 504 responses, with backoff. Default 2. */
   maxRetries?: number;
+  /** Permits plain http to a non-localhost host, e.g. a server on your LAN. Off by default. */
+  allowInsecureHttp?: boolean;
   /** Extra headers on every request, such as a Vertex AI access token. */
   headers?: Record<string, string>;
 }

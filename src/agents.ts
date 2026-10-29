@@ -43,6 +43,7 @@ export interface Agent {
   asTool(description: string): Tool<{ task: string }>;
 }
 
+/** An agent: a reusable model, system prompt and tools that can run on its own or be given to another agent as a tool. */
 export function defineAgent(config: AgentConfig): Agent {
   const { name, onEvent, maxDepth = 4, ...base } = config;
   if (!NAME.test(name)) throw new Error(`Invalid agent name "${name}": use letters, digits, _ or - (max 64)`);

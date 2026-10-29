@@ -3,12 +3,13 @@ import type { RunOptions, RunResult } from "./agent.js";
 import { run } from "./agent.js";
 import { lockStore } from "./lock.js";
 import { appendUser } from "./messages.js";
-import { trimHistory, withSummary } from "./history.js";
+import { stripReasoning, trimHistory, withSummary } from "./history.js";
 import { canonical } from "./validate.js";
 
 export type { Store } from "./types.js";
 export { trimHistory } from "./history.js";
 
+/** A `Store` kept in memory, for tests and single-process apps. Values are copied in and out as JSON. */
 export function memoryStore(): Store {
   const data = new Map<string, string>();
   return {
@@ -28,12 +29,6 @@ export function memoryStore(): Store {
   };
 }
 
-/**
- * A conversation that persists in `store` under `id`, so it survives across `run` calls and restarts.
- * Runs and `clear()` on the same id are queued in order. A store with its own `lock` (such as `fileStore`
- * from nanoharness-fs) extends that to other processes sharing it; otherwise it holds within one process,
- * for stores that are the same object.
- */
 export interface SessionOptions {
   /** Keep at most this many messages (cut at a safe point) before each run, so a long conversation stays bounded. */
   maxMessages?: number;
@@ -41,6 +36,12 @@ export interface SessionOptions {
   summarize?: (dropped: Message[]) => string | Promise<string>;
 }
 
+/**
+ * A conversation that persists in `store` under `id`, so it survives across `run` calls and restarts.
+ * Runs and `clear()` on the same id are queued in order. A store with its own `lock` (such as `fileStore`
+ * from nanoharness-fs) extends that to other processes sharing it; otherwise it holds within one process,
+ * for stores that are the same object.
+ */
 export function session(store: Store, id: string, sessionOpts: SessionOptions = {}) {
   const { maxMessages, summarize } = sessionOpts;
   if (maxMessages !== undefined && !(Number.isInteger(maxMessages) && maxMessages >= 1)) {
@@ -55,8 +56,9 @@ export function session(store: Store, id: string, sessionOpts: SessionOptions = 
       lockStore(store, key, async () => {
         let history = (await store.get<Message[]>(key)) ?? [];
         if (maxMessages !== undefined && history.length > maxMessages) {
-          const kept = trimHistory(history, { maxMessages });
-          const dropped = history.slice(0, history.length - kept.length);
+          const tail = trimHistory(history, { maxMessages });
+          const dropped = history.slice(0, history.length - tail.length);
+          const kept = stripReasoning(tail);
           history = summarize && dropped.length > 0 ? withSummary(kept, await summarize(dropped)) : kept;
         }
         const result = await run({ ...opts, prompt: appendUser(history, opts.prompt) });
@@ -65,6 +67,9 @@ export function session(store: Store, id: string, sessionOpts: SessionOptions = 
       }),
   };
 }
+
+/** What `session()` returns. */
+export type Session = ReturnType<typeof session>;
 
 /**
  * Checks that a store you wrote (for Redis, Postgres, ...) behaves the way nanoharness expects. It writes and
@@ -96,7 +101,14 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
     for (const key of written) await store.delete(key).catch(() => {});
   };
   // Cleanup is bounded too, so a store whose delete() hangs still gets an answer.
-  const bounded = (p: Promise<void>) => Promise.race([p, new Promise<void>((r) => setTimeout(r, timeoutMs).unref?.())]);
+  const bounded = async (p: Promise<void>) => {
+    let t: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([p, new Promise<void>((r) => (t = setTimeout(r, timeoutMs)))]);
+    } finally {
+      clearTimeout(t);
+    }
+  };
   const checks = async () => {
     if ((await s.get(k("missing"))) !== undefined) found.push("get() of a missing key should return undefined");
     const value = fresh();

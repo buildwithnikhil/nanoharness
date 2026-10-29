@@ -281,19 +281,29 @@ export interface PromptAdapterOptions {
 }
 
 // Every piece of text is written as a JSON string, so a message or tool result cannot forge a transcript line.
+// Earlier tool calls appear in the same {"tool_calls": [...]} form the model is told to reply with, so copying the
+// transcript still makes a valid call.
 function render(messages: Message[]): string {
   const lines: string[] = [];
+  const names = new Map<string, string>();
   for (const m of messages) {
     const who = m.role === "user" ? "User" : "Assistant";
     if (typeof m.content === "string") {
       lines.push(`${who}: ${JSON.stringify(m.content)}`);
       continue;
     }
+    const calls: Array<{ name: string; input: unknown }> = [];
     for (const b of m.content) {
       if (b.type === "text") lines.push(`${who}: ${JSON.stringify(b.text)}`);
-      else if (b.type === "tool_use") lines.push(`Assistant tool call: ${JSON.stringify({ id: b.id, name: b.name, input: b.input })}`);
-      else lines.push(`Tool result: ${JSON.stringify({ id: b.tool_use_id, ...(b.is_error ? { error: true } : {}), content: b.content })}`);
+      else if (b.type === "tool_use") {
+        names.set(b.id, b.name);
+        calls.push({ name: b.name, input: b.input });
+      } else if (b.type === "tool_result") {
+        const name = names.get(b.tool_use_id) ?? "unknown";
+        lines.push(`Tool result: ${JSON.stringify({ name, ...(b.is_error ? { error: true } : {}), content: b.content })}`);
+      }
     }
+    if (calls.length) lines.push(`Assistant: ${JSON.stringify({ tool_calls: calls })}`);
   }
   lines.push("Assistant:");
   return lines.join("\n\n");
@@ -382,7 +392,8 @@ export function promptAdapter(opts: PromptAdapterOptions): Adapter {
           "You can use these tools (input described as JSON Schema):\n" +
           req.tools.map((t) => `- ${t.name}: ${t.description}\n  input: ${JSON.stringify(t.input_schema)}`).join("\n") +
           '\n\nTo call tools, reply with ONLY this JSON and no other text: {"tool_calls": [{"name": "<tool name>", "input": { ... }}]}' +
-          "\nYou will then see each tool result. When you have the final answer, reply with plain text and no JSON.";
+          "\nYou will then see each tool result." +
+          "\nWhen you have the final answer, reply with plain text and no JSON.";
       }
       const reply = await opts.generate({ system, prompt: render(req.messages), signal: req.signal });
       const text = typeof reply === "string" ? reply : reply.text;
