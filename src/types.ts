@@ -21,7 +21,20 @@ export interface ToolResultBlock {
   is_error?: boolean;
 }
 
-export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock;
+/**
+ * A model's reasoning, such as Anthropic's thinking blocks. Kept in the history and sent back unchanged to the
+ * provider that wrote it (some require that); other providers leave it out. `text` is a readable summary, often empty.
+ */
+export interface ReasoningBlock {
+  type: "reasoning";
+  /** Which adapter format wrote it, e.g. "anthropic". */
+  provider: string;
+  /** The provider's own block, replayed as is. */
+  data: Record<string, unknown>;
+  text?: string;
+}
+
+export type ContentBlock = TextBlock | ToolUseBlock | ToolResultBlock | ReasoningBlock;
 
 export interface Message {
   role: "user" | "assistant";
@@ -56,10 +69,11 @@ export interface AdapterRequest {
   signal?: AbortSignal;
 }
 
-export type AdapterStopReason = "end_turn" | "tool_use" | "max_tokens" | "other";
+/** `refusal`: the provider declined (a refusal, a content filter or a safety stop). */
+export type AdapterStopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";
 
 export interface AdapterResponse {
-  content: Array<TextBlock | ToolUseBlock>;
+  content: Array<TextBlock | ToolUseBlock | ReasoningBlock>;
   stopReason: AdapterStopReason;
   usage?: Usage;
 }

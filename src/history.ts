@@ -24,6 +24,17 @@ export function trimHistory(messages: Message[], opts: { maxMessages: number }):
   return messages.slice(start);
 }
 
+/**
+ * Removes reasoning blocks. Providers such as Anthropic tie each thinking block to the whole conversation before it,
+ * so after earlier turns are cut the kept blocks would be rejected; the turns' text and tool calls stay.
+ */
+export function stripReasoning(messages: Message[]): Message[] {
+  return messages.map((m) => {
+    if (typeof m.content === "string" || !m.content.some((b) => b.type === "reasoning")) return m;
+    return { role: m.role, content: m.content.filter((b) => b.type !== "reasoning") };
+  }).filter((m) => typeof m.content === "string" || m.content.length > 0);
+}
+
 /** Puts a summary of dropped messages at the front of the first kept message, so the history stays valid. */
 export function withSummary(kept: Message[], summary: string): Message[] {
   const note = `Summary of the earlier conversation:\n${summary}`;

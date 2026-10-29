@@ -11,7 +11,7 @@ A lightweight, zero-dependency agent harness. You give it a model adapter and so
 
 | Package | What it is |
 |---|---|
-| `nanoharness` | The loop, tools, guardrails, agents, graphs, in-memory store and sessions, plus adapters for any OpenAI- or Anthropic-format server. Works on its own. |
+| `nanoharness` | The loop, tools, guardrails, agents, graphs, in-memory store and sessions, plus adapters for any OpenAI-, Anthropic- or Gemini-format server. Works on its own. |
 | [`nanoharness-anthropic`](packages/anthropic) | Adapter for Claude. |
 | [`nanoharness-openai`](packages/openai) | Adapter for OpenAI and any OpenAI-compatible server (Ollama, vLLM, OpenRouter, LM Studio, Groq, ...). |
 | [`nanoharness-gemini`](packages/gemini) | Adapter for Google Gemini: the Gemini API and Vertex AI. |
@@ -156,7 +156,7 @@ const chat = session(store, "user-42", {
 });
 ```
 
-Trimming happens before each run, so what is stored after a run can be longer by that run's messages. The summary is placed at the front of the kept history and is itself summarised again later. `trimHistory(messages, { maxMessages })` is the same trimming as a plain function, for histories you manage yourself.
+Trimming happens before each run, so what is stored after a run can be longer by that run's messages. The summary is placed at the front of the kept history and is itself summarised again later. Trimming also removes reasoning blocks (such as Claude's thinking) from the kept messages, because providers reject reasoning whose earlier conversation was cut. `trimHistory(messages, { maxMessages })` is the same trimming as a plain function, for histories you manage yourself; pass its result through `stripReasoning` before sending it.
 
 `memoryStore` ships with the core and `fileStore` with `nanoharness-fs`. A `Store` is four methods (`get`, `set`, `delete`, `keys`), plus an optional `lock` for stores shared by several processes, so you can back it with Redis, Postgres or anything else in a few lines. Run `checkStore(yourStore)` from `nanoharness/store` to confirm it behaves as expected; it returns a list of problems, empty when it passes.
 
@@ -234,7 +234,7 @@ They have everything the official adapters have: streaming, tool calls, token us
 | `baseUrl`, `model`, `fetch` | Required. `baseUrl` ends before `/chat/completions`. | Required. `baseUrl` ends before `/v1/messages`. | Required. `baseUrl` ends before `/models/{model}:generateContent`. |
 | `apiKey` | Sent as a Bearer token, if set. | Sent as `x-api-key`, if set. | Sent as `x-goog-api-key`, if set. |
 | `headers` | Extra headers; they can replace the defaults (e.g. a gateway's own auth header). | Same. | Same (e.g. a Vertex AI bearer token). |
-| `maxTokens`, `temperature`, `maxRetries` (default 2), `allowInsecureHttp`, `name` | Yes. Also `maxTokensParam` and `streamUsage`. | Yes. `maxTokens` defaults to 4096. Also `version` (the `anthropic-version` header). | Yes. |
+| `maxTokens`, `temperature`, `maxRetries` (default 2), `allowInsecureHttp`, `name` | Yes. Also `maxTokensParam` and `streamUsage`. | Yes. `maxTokens` defaults to 16,000. Also `version` (the `anthropic-version` header). | Yes. |
 
 **2. Any text-in, text-out model** (a local model, a CLI, an API without native tool calling) works with `promptAdapter`. You write one function that sends text and returns text; tools are described in the system text and the model calls them by replying with JSON.
 
@@ -307,7 +307,7 @@ The official adapters throw `AdapterError` from `nanoharness-anthropic` and `nan
 | Helper | What it does |
 |---|---|
 | `limitConcurrency(adapter, n)` | At most `n` calls to the adapter at once, across all runs and agents that use it. Waiting calls leave the queue if their run is aborted. |
-| `withRetry(adapter, opts)` | Retries an `AdapterError` marked retryable (408, 429, 5xx) and `fetch` network failures, with jittered backoff that honours the server's `retry-after`. A stream is retried only if it failed before any text arrived. `retryable` lets you decide for other errors. |
+| `withRetry(adapter, opts)` | Retries an `AdapterError` marked retryable (408, 429, 5xx) and `fetch` network failures, with jittered backoff that honours the server's `retry-after`. A stream is retried only if it failed before any text arrived. `retryable` lets you decide for other errors. Options: `maxRetries` (default 2), `baseDelayMs` (default 500, doubling each attempt), `maxDelayMs` (default 30,000, also caps `retry-after`), `retryable`. |
 | `session(..., { maxMessages, summarize })` | Keeps long conversations within the context window. See Persistence. |
 | `onEvent` on `run()` | Every event, for logs and traces. `model_call` events carry `durationMs`, `usage` and `stopReason` (or `error` when the call failed); `tool_result` events carry `durationMs`. |
 
@@ -347,7 +347,9 @@ for await (const ev of stream({ adapter, prompt, tools })) {
 | `streaming` | Use the adapter's `stream` and emit `text_delta` events. Default `false`. |
 | `onEvent` | Called with every event when you use `run()`. If it throws, the run is stopped (its model request closed) and the error is thrown. |
 
-`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `aborted`, `eval_failed` or `budget_exceeded`. A rejected answer is never `end_turn`: if `evaluate` rejects it and no retries or turns are left, the result is `eval_failed`.
+`stopReason` is one of `end_turn`, `max_turns`, `max_tokens`, `refusal`, `aborted`, `eval_failed` or `budget_exceeded`. A rejected answer is never `end_turn`: if `evaluate` rejects it and no retries or turns are left, the result is `eval_failed`. `refusal` means the provider declined (a refusal, a content filter or a safety stop); `finalText` holds whatever text it sent, and no tool it asked for is run. New stop reasons and event types can be added in minor releases, so give an exhaustive `switch` a `default` case.
+
+**Reasoning.** Models that think before answering (Claude's thinking, for example) return `reasoning` blocks. They stay in `result.messages` and are sent back unchanged to the provider that wrote them, as Claude requires during tool use; other providers never see them. Do not edit or reorder earlier turns of a history that contains them, since providers tie each block to the conversation before it: append instead, or pass the history through `stripReasoning` first.
 
 Aborting stops the run promptly. Tool calls that have not started are skipped and answered with an error, so the history stays valid, and a tool that ignores its `signal` is no longer waited for. If the token limit cuts off a tool call halfway, the call is not run, that turn is dropped from `messages`, and `stopReason` is `max_tokens`, so you can retry with a larger limit.
 

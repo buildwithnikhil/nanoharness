@@ -185,10 +185,10 @@ test("a 2xx body that is not JSON, and huge error bodies, give clear errors", as
   await assert.rejects(run({ adapter: huge, prompt: "x" }), (e) => e.message.length < 2500 && /400/.test(e.message) && /truncated/.test(e.message));
 });
 
-test("stop reasons: refusal ends the turn, unknown ones map to other", async () => {
+test("stop reasons: refusal is reported as a refusal, unknown ones map to other", async () => {
   const mk = (stop) => anthropic({ apiKey: "k", fetch: async () => new Response(JSON.stringify({ content: [{ type: "text", text: "no" }], stop_reason: stop })) });
   const go = (stop) => mk(stop).complete({ messages: [{ role: "user", content: "x" }], tools: [] });
-  assert.equal((await go("refusal")).stopReason, "end_turn");
+  assert.equal((await go("refusal")).stopReason, "refusal");
   assert.equal((await go("stop_sequence")).stopReason, "end_turn");
   assert.equal((await go("pause_turn")).stopReason, "other");
 });
@@ -287,4 +287,100 @@ test("streaming over real HTTP: deltas arrive while the server is still sending"
     // Streaming means text is in hand before the server has finished sending, not all at once at the end.
     assert.ok(arrivals[0] < lastSentAt, `first delta arrived ${arrivals[0] - lastSentAt}ms relative to the last chunk being sent`);
   } finally { server.close(); server.closeAllConnections?.(); }
+});
+
+// ---------------- thinking, refusals (standards audit)
+import { memoryStore, session } from "nanoharness/store";
+
+const add2 = defineTool({ name: "add", description: "Add", schema: { type: "object", properties: { a: { type: "number" }, b: { type: "number" } }, required: ["a", "b"] }, run: ({ a, b }) => a + b });
+const jsonRes = (v) => new Response(JSON.stringify(v), { headers: { "content-type": "application/json" } });
+const ev = (o) => `event: ${o.type}\ndata: ${JSON.stringify(o)}\n\n`;
+const sse = (events) => new Response(events.map(ev).join(""), { headers: { "content-type": "text/event-stream" } });
+
+test("thinking and redacted_thinking blocks are kept and sent back unchanged, in place, with the tool results", async () => {
+  const thinking = { type: "thinking", thinking: "", signature: "sig-1" };
+  const redacted = { type: "redacted_thinking", data: "opaque" };
+  const sent = [];
+  const replies = [
+    jsonRes({ content: [thinking, redacted, { type: "tool_use", id: "t1", name: "add", input: { a: 1, b: 2 } }], stop_reason: "tool_use" }),
+    jsonRes({ content: [{ type: "text", text: "3" }], stop_reason: "end_turn" }),
+  ];
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => (sent.push(JSON.parse(init.body)), replies.shift()) });
+  const r = await run({ adapter, prompt: "1+2", tools: [add2] });
+  assert.equal(r.finalText, "3");
+  assert.deepEqual(sent[1].messages[1].content, [thinking, redacted, { type: "tool_use", id: "t1", name: "add", input: { a: 1, b: 2 } }]);
+});
+
+test("streamed thinking is rebuilt from its deltas and sent back", async () => {
+  const sent = [];
+  const replies = [
+    sse([
+      { type: "message_start", message: { usage: { input_tokens: 5, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "", signature: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "Let me add." } },
+      { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-xyz" } },
+      { type: "content_block_stop", index: 0 },
+      { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t1", name: "add", input: {} } },
+      { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"a":2,"b":2}' } },
+      { type: "content_block_stop", index: 1 },
+      { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 9 } },
+      { type: "message_stop" },
+    ]),
+    sse([
+      { type: "message_start", message: { usage: { input_tokens: 9, output_tokens: 0 } } },
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "4" } },
+      { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+      { type: "message_stop" },
+    ]),
+  ];
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => (sent.push(JSON.parse(init.body)), replies.shift()) });
+  const r = await run({ adapter, prompt: "2+2", tools: [add2], streaming: true });
+  assert.equal(r.finalText, "4");
+  assert.deepEqual(sent[1].messages[1].content[0], { type: "thinking", thinking: "Let me add.", signature: "sig-xyz" });
+  assert.equal(r.messages[1].content[0].text, "Let me add.", "the thinking text is readable on the block");
+});
+
+test("reasoning from another provider is not sent to Anthropic", async () => {
+  let body;
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => ((body = JSON.parse(init.body)), new Response(okBody())) });
+  await run({ adapter, prompt: [
+    { role: "user", content: "hi" },
+    { role: "assistant", content: [{ type: "reasoning", provider: "other", data: { secret: 1 } }, { type: "text", text: "hello" }] },
+    { role: "user", content: "again" },
+  ] });
+  assert.deepEqual(body.messages[1].content, [{ type: "text", text: "hello" }]);
+});
+
+test("a refusal ends the run as a refusal; a full context window is max_tokens", async () => {
+  const refused = await run({ adapter: anthropic({ apiKey: "k", fetch: async () => jsonRes({ content: [{ type: "tool_use", id: "x", name: "add", input: { a: 1, b: 1 } }], stop_reason: "refusal" }) }), prompt: "x", tools: [add2] });
+  assert.equal(refused.stopReason, "refusal");
+  assert.ok(!refused.messages.some((m) => typeof m.content !== "string" && m.content.some((b) => b.type === "tool_result")), "no tool ran");
+  const full = await run({ adapter: anthropic({ apiKey: "k", fetch: async () => jsonRes({ content: [{ type: "text", text: "cut" }], stop_reason: "model_context_window_exceeded" }) }), prompt: "x" });
+  assert.equal(full.stopReason, "max_tokens");
+});
+
+test("a session that trims history drops the kept turns' thinking, so Claude does not reject it", async () => {
+  const store = memoryStore();
+  const sent = [];
+  const reply = () => jsonRes({ content: [{ type: "thinking", thinking: "", signature: `s${sent.length}` }, { type: "text", text: `a${sent.length}` }], stop_reason: "end_turn" });
+  const chat = session(store, "s", { maxMessages: 4 });
+  const adapter = anthropic({ apiKey: "k", fetch: async (_, init) => (sent.push(JSON.parse(init.body)), reply()) });
+  for (let i = 0; i < 4; i++) await chat.run({ adapter, prompt: `q${i}` });
+  assert.ok(JSON.stringify(sent[2].messages).includes('"signature":"s1"'), "an untrimmed history keeps thinking");
+  assert.ok(sent[3].messages.length <= 5, "the fourth run was trimmed");
+  assert.ok(!JSON.stringify(sent[3].messages).includes("thinking"), "after a trim, no thinking is replayed");
+});
+
+test("cached input tokens count as input, whole and streamed", async () => {
+  const whole = await run({ adapter: anthropic({ apiKey: "k", fetch: async () => jsonRes({ content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", usage: { input_tokens: 61, cache_read_input_tokens: 112, cache_creation_input_tokens: 7, output_tokens: 5 } }) }), prompt: "x" });
+  assert.deepEqual(whole.usage, { inputTokens: 180, outputTokens: 5 });
+  const streamed = await run({ adapter: anthropic({ apiKey: "k", fetch: async () => sse([
+    { type: "message_start", message: { usage: { input_tokens: 1, cache_read_input_tokens: 172, output_tokens: 1 } } },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } },
+    { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 9 } },
+    { type: "message_stop" },
+  ]) }), prompt: "x", streaming: true });
+  assert.deepEqual(streamed.usage, { inputTokens: 173, outputTokens: 9 }, "a delta without input fields keeps the start's counts");
 });

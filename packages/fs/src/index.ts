@@ -16,6 +16,7 @@ export interface FsToolsOptions {
 const NOFOLLOW = C.O_NOFOLLOW ?? 0; // 0 where the platform has no such flag (Windows)
 const NONBLOCK = C.O_NONBLOCK ?? 0;
 
+/** `read_file` and `list_dir` (and `write_file` with `allowWrite`) confined to `root`. */
 export function createFsTools(opts: FsToolsOptions): Tool[] {
   const root = realpathSync(path.resolve(opts.root));
   const maxFileBytes = opts.maxFileBytes ?? 1_000_000;
@@ -127,7 +128,31 @@ export function createFsTools(opts: FsToolsOptions): Tool[] {
     );
   }
 
-  return tools;
+  // System errors name the absolute path on disk; the model only ever sees the path it asked for.
+  return tools.map((t) => ({ ...t, run: async (input, ctx) => {
+    try {
+      return await t.run(input, ctx);
+    } catch (e) {
+      throw plainError(e, (input as { path?: unknown }).path);
+    }
+  } }));
+}
+
+const ERRNO: Record<string, string> = {
+  ENOENT: "No such file or directory",
+  EACCES: "Permission denied",
+  EPERM: "Permission denied",
+  EISDIR: "Is a directory",
+  ENOTDIR: "Not a directory",
+  ELOOP: "Is a symlink",
+  EEXIST: "Already exists",
+  ENOSPC: "No space left on the device",
+};
+
+function plainError(e: unknown, p: unknown): unknown {
+  const code = (e as NodeJS.ErrnoException)?.code;
+  if (typeof code !== "string" || !(e instanceof Error) || !("syscall" in e)) return e;
+  return new Error(`${ERRNO[code] ?? code}: ${typeof p === "string" ? p : "(path)"}`);
 }
 
 export interface FileStoreOptions {

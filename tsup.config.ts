@@ -13,4 +13,6 @@ export default defineConfig({
   clean: true,
   target: "node18",
   external: ["zod"],
+  // One shared chunk for CJS as for ESM, so module state (such as the in-process lock queue) exists once.
+  splitting: true,
 });

@@ -30,7 +30,8 @@ test("maps a plain request and response", async () => {
   assert.equal(sent.headers.authorization, "Bearer k");
   assert.deepEqual(sent.body.messages, [{ role: "system", content: "sys" }, { role: "user", content: "yo" }]);
   assert.equal(sent.body.model, "gpt-x");
-  assert.equal(sent.body.max_tokens, 50);
+  assert.equal(sent.body.max_completion_tokens, 50, "OpenAI gets the current field");
+  assert.equal("max_tokens" in sent.body, false);
   assert.equal(sent.body.temperature, 0.2);
   assert.equal("tools" in sent.body, false);
   assert.equal(r.finalText, "hi");
@@ -82,7 +83,7 @@ test("finish_reason mapping", async () => {
   const mk = (message, finish) => openai({ model: "m", fetch: async () => reply(message, finish) });
   const complete = (a) => a.complete({ messages: [{ role: "user", content: "x" }], tools: [] });
   assert.equal((await complete(mk({ content: "a" }, "length"))).stopReason, "max_tokens");
-  assert.equal((await complete(mk({ content: "a" }, "content_filter"))).stopReason, "other");
+  assert.equal((await complete(mk({ content: "a" }, "content_filter"))).stopReason, "refusal");
   assert.equal((await complete(mk({ content: null, tool_calls: [{ id: "1", function: { name: "t", arguments: "{}" } }] }, "tool_calls"))).stopReason, "tool_use");
 });
 
@@ -305,4 +306,23 @@ test("streaming: tool calls sent whole without `index` stay separate (some compa
     delta({ tool_calls: [{ function: { arguments: ":1}" } }] }),
     delta({}, "tool_calls"), "[DONE]",
   ]), [want[0]]);
+});
+
+test("a compatible server (baseUrl set) gets max_tokens unless told otherwise", async () => {
+  let body;
+  const fetch = async (_, init) => ((body = JSON.parse(init.body)), reply({ content: "ok" }));
+  await run({ adapter: openai({ model: "llama", baseUrl: "http://localhost:11434/v1", maxTokens: 10, fetch }), prompt: "x" });
+  assert.equal(body.max_tokens, 10);
+  await run({ adapter: openai({ model: "o3", baseUrl: "https://gw.example.com/v1", maxTokens: 10, maxTokensParam: "max_completion_tokens", fetch }), prompt: "x" });
+  assert.equal(body.max_completion_tokens, 10);
+});
+
+test("a refusal or a content filter ends the run as a refusal, not an answer", async () => {
+  const r = await run({ adapter: openai({ model: "m", fetch: async () => reply({ content: null, refusal: "I can't help with that." }) }), prompt: "x" });
+  assert.equal(r.stopReason, "refusal");
+  assert.equal(r.finalText, "I can't help with that.");
+  const f = await run({ adapter: openai({ model: "m", fetch: async () => reply({ content: "partial" }, "content_filter") }), prompt: "x" });
+  assert.equal(f.stopReason, "refusal");
+  const s = await run({ adapter: openai({ model: "m", fetch: async () => chunks([delta({ refusal: "I can't " }), delta({ refusal: "do that." }, "stop"), "[DONE]"]) }), prompt: "x", streaming: true });
+  assert.deepEqual([s.stopReason, s.finalText], ["refusal", "I can't do that."]);
 });

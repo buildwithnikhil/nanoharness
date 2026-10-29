@@ -112,3 +112,16 @@ test("CJS build loads", () => {
   assert.equal(typeof m.createFsTools, "function");
   assert.equal(typeof m.fileStore, "function");
 });
+
+test("errors never show the model the absolute path on disk", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "nh-fs-"));
+  const [read] = createFsTools({ root });
+  await assert.rejects(read.run({ path: "missing.txt" }, {}), (e) => {
+    assert.equal(e.message, "No such file or directory: missing.txt");
+    assert.ok(!e.message.includes(root));
+    return true;
+  });
+});

@@ -25,7 +25,7 @@ const { finalText } = await run({ adapter, prompt: "Say hi in one word." });
 | `apiKey` | Sent as a Bearer token. Optional for local servers. |
 | `baseUrl` | Default `https://api.openai.com/v1`. Must be `https`, or `http` on `localhost`, and must not contain credentials. |
 | `allowInsecureHttp` | Allows plain `http` to a non-localhost host, such as a server on your LAN or in Docker. Off by default. |
-| `maxTokens`, `maxTokensParam` | `maxTokensParam` is `"max_tokens"` (default) or `"max_completion_tokens"`, which OpenAI's newer models require. |
+| `maxTokens`, `maxTokensParam` | `maxTokensParam` is `"max_completion_tokens"` by default for OpenAI (reasoning models reject the deprecated `"max_tokens"`), and `"max_tokens"` when you set `baseUrl`, since most compatible servers expect it. Set it to override. |
 | `temperature` | Sent only when set. |
 | `headers` | Extra headers on every request, such as a gateway header. They can replace the default ones. |
 | `maxRetries` | Retries for HTTP 408, 429, 500, 502, 503 and 504, with backoff that honours `retry-after` (seconds or an HTTP date). Default `2`. |

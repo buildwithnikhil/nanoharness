@@ -76,7 +76,9 @@ test("a failed tool is reported as an error response", async () => {
 test("stop reasons: MAX_TOKENS wins over a call, safety stops are 'other', a blocked prompt is an error", async () => {
   const one = async (res) => gemini({ model: "m", apiKey: "k", fetch: async () => res }).complete({ messages: [{ role: "user", content: "x" }], tools: [] });
   assert.equal((await one(json(reply([{ functionCall: { name: "add", args: { a: 1 } } }], "MAX_TOKENS")))).stopReason, "max_tokens");
-  assert.equal((await one(json(reply([], "SAFETY")))).stopReason, "other");
+  assert.equal((await one(json(reply([], "SAFETY")))).stopReason, "refusal");
+  assert.equal((await one(json(reply([{ functionCall: { name: "add", args: {} } }], "PROHIBITED_CONTENT")))).stopReason, "refusal", "a refusal wins over a call");
+  await assert.rejects(one(json(reply([], "MISSING_THOUGHT_SIGNATURE"))), /missing a thought signature/);
   assert.equal((await one(json(reply([{ text: "x" }], "MALFORMED_FUNCTION_CALL")))).stopReason, "other");
   await assert.rejects(one(json({ promptFeedback: { blockReason: "SAFETY" } })), (e) => e instanceof AdapterError && /blocked the prompt: SAFETY/.test(e.message) && !e.retryable);
   await assert.rejects(one(json({})), /no candidates/);

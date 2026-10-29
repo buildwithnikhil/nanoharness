@@ -20,10 +20,12 @@ const { finalText } = await run({
 |---|---|
 | `apiKey` | Required. |
 | `model` | Default `claude-sonnet-5-5`. |
-| `maxTokens` | Default `4096`. |
+| `maxTokens` | Default `16000`. Thinking counts toward it. |
 | `headers` | Extra headers on every request, such as a gateway header. They can replace the default ones. |
 | `maxRetries` | Retries for HTTP 408, 429, 500, 502, 503, 504 and 529, with backoff that honours `retry-after` (seconds or an HTTP date). Default `2`. |
 | `baseUrl` | Where requests, and so the API key, are sent. Must be `https` (`http` only for `localhost`) and must not contain credentials. Default `https://api.anthropic.com`. |
+| `allowInsecureHttp` | Allows plain `http` to a non-localhost host, such as a gateway on your LAN. Off by default. |
+| `temperature` | Only for older models and compatible servers: current Claude models reject it with a 400. |
 | `fetch` | A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. |
 
 ## Streaming and errors

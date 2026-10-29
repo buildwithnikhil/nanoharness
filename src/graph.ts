@@ -58,6 +58,10 @@ interface Checkpoint<S> {
   step: number;
 }
 
+/**
+ * A workflow of named nodes that each update a shared state and say which node runs next. With a `store`, every
+ * step is checkpointed, so a run with the same id resumes where it stopped.
+ */
 export function createGraph<S extends object>(opts: GraphOptions<S>) {
   const { nodes, entry, edges = {}, maxSteps = 50 } = opts;
   if (!hasOwn(nodes, entry)) throw new Error(`Unknown entry node: ${entry}`);
@@ -118,3 +122,6 @@ export function createGraph<S extends object>(opts: GraphOptions<S>) {
       store && key ? lockStore(store, key, () => execute(initial, runOpts)) : execute(initial, runOpts),
   };
 }
+
+/** What `createGraph()` returns. */
+export type Graph<S extends object> = ReturnType<typeof createGraph<S>>;

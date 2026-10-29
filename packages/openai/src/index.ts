@@ -11,7 +11,10 @@ export interface OpenAIOptions {
   /** Permits plain http to a non-localhost host, e.g. a server on your LAN or in Docker. Off by default. */
   allowInsecureHttp?: boolean;
   maxTokens?: number;
-  /** Which field carries `maxTokens`. Default "max_tokens"; OpenAI's newer models want "max_completion_tokens". */
+  /**
+   * Which field carries `maxTokens`. Default "max_completion_tokens" for OpenAI (the older "max_tokens" is deprecated
+   * and rejected by reasoning models), and "max_tokens" when `baseUrl` is set, since most compatible servers expect it.
+   */
   maxTokensParam?: "max_tokens" | "max_completion_tokens";
   temperature?: number;
   /** A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. */
@@ -30,6 +33,7 @@ export function openai(opts: OpenAIOptions): Adapter {
   return openaiCompatible({
     ...opts,
     baseUrl: opts.baseUrl ?? "https://api.openai.com/v1",
+    maxTokensParam: opts.maxTokensParam ?? (opts.baseUrl ? "max_tokens" : "max_completion_tokens"),
     fetch: opts.fetch ?? fetch,
     name: "OpenAI API",
   });

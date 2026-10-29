@@ -13,6 +13,7 @@ export function allowTools(names: string[]): (call: ToolUseBlock) => Decision {
  * This reduces prompt-injection risk but does not eliminate it.
  */
 export function markUntrusted(tag = "untrusted_tool_output"): (r: { content: string }) => string {
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(tag)) throw new Error(`markUntrusted(): invalid tag "${tag}" (use letters, digits, _ and -)`);
   const close = new RegExp(`</${tag}>`, "gi");
   return ({ content }) => `<${tag}>\n${content.replace(close, `<\\/${tag}>`)}\n</${tag}>`;
 }
