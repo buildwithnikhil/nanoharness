@@ -1,4 +1,4 @@
-import { run, stream } from "./agent.js";
+import { drain, run, stream } from "./agent.js";
 import type { AgentEvent, RunOptions, RunResult } from "./agent.js";
 import { defineTool } from "./tool.js";
 import type { Budget, Tool } from "./tool.js";
@@ -63,12 +63,7 @@ export function defineAgent(config: AgentConfig): Agent {
     }
     try {
       if (!onEvent) return await run(opts);
-      const it = stream(opts);
-      for (;;) {
-        const next = await it.next();
-        if (next.done) return next.value;
-        onEvent(name, next.value);
-      }
+      return await drain(stream(opts), (event) => onEvent(name, event));
     } finally {
       dispose();
     }

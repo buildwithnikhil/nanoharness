@@ -9,17 +9,17 @@ Everything here is opt-in and adds no dependencies. The core still has no networ
 ### Added
 - **Streaming.** `streaming: true` on `run`, `stream` and `defineAgent` uses the adapter's new optional `stream` method and emits `text_delta` events. `nanoharness-anthropic` and `nanoharness-openai` both stream.
 - **Custom models.**
-  - `promptAdapter({ generate })` gives tool calling to any text-in, text-out model.
+  - `promptAdapter({ generate })` gives tool calling to any text-in, text-out model. The transcript it sends writes each message as a JSON string, so tool output cannot pose as a user turn.
   - `defineAdapter` types a hand-written adapter.
   - `readSSE` reads a streaming (Server-Sent Events) response.
-  - `AdapterError` carries the HTTP status, whether to retry, and `retryAfterMs`. Both official adapters now throw it.
+  - `AdapterError` carries the HTTP status, whether to retry, and `retryAfterMs`. Both official adapters now throw it, and `instanceof` works across the ESM and CJS builds.
 - **Scaling helpers.**
   - `limitConcurrency(adapter, n)` caps calls in flight across all runs and agents.
   - `withRetry(adapter, opts)` adds retry with jittered backoff to any adapter.
 - **Long conversations.** `session(store, id, { maxMessages, summarize })` keeps a session's history bounded, cutting at a safe point and optionally keeping a summary of what was dropped. `trimHistory` is the same as a plain function.
 - **Tracing.**
   - `onEvent` on `run()`.
-  - A `model_call` event after every model call, with `durationMs`, `usage` and `stopReason`.
+  - A `model_call` event after every model call, with `durationMs`, `usage` and `stopReason`, or `error` when the call failed or was aborted.
   - `tool_result` events now carry `durationMs`.
 - **Custom stores.** `checkStore(store)` checks a store you wrote. The README has a Redis example.
 - `Adapter.stream`, `AdapterStreamEvent` and `RunOptions.streaming` / `onEvent` in the types.

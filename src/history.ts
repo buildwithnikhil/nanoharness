@@ -12,7 +12,8 @@ const cleanStart = (m: Message | undefined): boolean =>
  * Returns a suffix of `messages`, so `messages.slice(0, messages.length - kept.length)` is what was dropped.
  */
 export function trimHistory(messages: Message[], opts: { maxMessages: number }): Message[] {
-  const max = Math.max(1, Math.floor(opts.maxMessages));
+  if (!(opts.maxMessages >= 1)) throw new Error("trimHistory(): maxMessages must be at least 1");
+  const max = Math.floor(opts.maxMessages);
   if (messages.length <= max) return [...messages];
   let start = messages.length - max;
   while (start < messages.length && !cleanStart(messages[start])) start++;

@@ -270,7 +270,13 @@ export function openai(opts: OpenAIOptions): Adapter {
           yield { type: "text_delta", text: choice.delta.content };
         }
         for (const tc of choice.delta?.tool_calls ?? []) {
-          const c = (calls[tc.index ?? 0] ??= { id: "", name: "", args: "" });
+          // Some compatible servers leave out `index` and send each call whole: a new id starts a new call.
+          let slot = tc.index;
+          if (slot === undefined) {
+            const last = calls.length - 1;
+            slot = last >= 0 && (!tc.id || tc.id === calls[last]?.id) ? last : calls.length;
+          }
+          const c = (calls[slot] ??= { id: "", name: "", args: "" });
           if (tc.id) c.id = tc.id;
           if (tc.function?.name && !c.name) c.name = tc.function.name;
           c.args += tc.function?.arguments ?? "";
