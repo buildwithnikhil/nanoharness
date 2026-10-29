@@ -142,7 +142,7 @@ test("baseUrl: custom https URL is used, with a path prefix and trailing slash h
 
 test("baseUrl: refuses plain http to remote hosts, credentials and garbage, so the key is never leaked", () => {
   for (const baseUrl of ["http://api.example.com", "https://user:pw@example.com", "not a url", "ftp://example.com", "http://localhost.evil.com"]) {
-    assert.throws(() => anthropic({ apiKey: "k", baseUrl }), /anthropic\(\)/, baseUrl);
+    assert.throws(() => anthropic({ apiKey: "k", baseUrl }), /Anthropic API: (invalid baseUrl|baseUrl must)/, baseUrl);
   }
 });
 

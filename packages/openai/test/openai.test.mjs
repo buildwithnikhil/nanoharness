@@ -131,7 +131,7 @@ test("baseUrl rules: https or localhost only, unless allowInsecureHttp; no crede
   await run({ adapter: openai({ model: "m", baseUrl: "http://ollama:11434/v1", allowInsecureHttp: true, fetch: f }), prompt: "x" });
   assert.deepEqual(urls, ["https://openrouter.ai/api/v1/chat/completions", "http://localhost:8000/v1/chat/completions", "http://ollama:11434/v1/chat/completions"]);
   for (const baseUrl of ["http://api.example.com/v1", "https://u:p@example.com", "nope", "ftp://x.com"]) {
-    assert.throws(() => openai({ model: "m", baseUrl }), /openai\(\)/, baseUrl);
+    assert.throws(() => openai({ model: "m", baseUrl }), /OpenAI API: (invalid baseUrl|baseUrl must)/, baseUrl);
   }
 });
 

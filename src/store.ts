@@ -79,56 +79,76 @@ export async function checkStore(store: Store, prefix = "nanoharness-check:", op
   const fresh = () => ({ text: "héllo 😀", n: 1.5, list: [1, null, true], nested: { a: [{ b: "c" }] } });
   // Compared in canonical form, so a store that reorders object keys (such as Postgres jsonb) still passes.
   const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
+  // After a timeout the check is abandoned: its later store calls are refused, what it finds after that is not
+  // reported, and the keys it wrote are cleaned up again once it settles.
+  let abandoned = false;
+  const found: string[] = [];
+  const live = <T>(call: () => Promise<T>): Promise<T> => (abandoned ? Promise.reject(new Error("abandoned")) : call());
+  const s: Store = {
+    get: (key) => live(() => store.get(key)),
+    set: (key, value) => live(() => store.set(key, value)),
+    delete: (key) => live(() => store.delete(key)),
+    keys: (p) => live(() => store.keys(p)),
+    ...(store.lock ? { lock: <T>(key: string, fn: () => Promise<T>) => live(() => store.lock!(key, fn)) } : {}),
+  };
+  const cleanup = async () => {
+    for (const key of written) await store.delete(key).catch(() => {});
+  };
   const checks = async () => {
-    if ((await store.get(k("missing"))) !== undefined) problems.push("get() of a missing key should return undefined");
+    if ((await s.get(k("missing"))) !== undefined) found.push("get() of a missing key should return undefined");
     const value = fresh();
-    await store.set(k("a"), value);
+    await s.set(k("a"), value);
     value.nested.a[0]!.b = "changed after set";
-    const back = await store.get<ReturnType<typeof fresh>>(k("a"));
-    if (!same(back, fresh())) problems.push("get() did not return what set() stored (JSON values must round-trip, and set() must keep a copy)");
+    const back = await s.get<ReturnType<typeof fresh>>(k("a"));
+    if (!same(back, fresh())) found.push("get() did not return what set() stored (JSON values must round-trip, and set() must keep a copy)");
     if (back && typeof back === "object") back.nested.a[0]!.b = "changed after get";
-    if (!same(await store.get(k("a")), fresh())) problems.push("get() must return a copy: changing what it returned changed the stored value");
-    await store.set(k("a"), "overwritten");
-    if ((await store.get(k("a"))) !== "overwritten") problems.push("set() should overwrite an existing key");
-    await store.set(k("b"), 0);
-    if ((await store.get(k("b"))) !== 0) problems.push("falsy values such as 0 must be stored");
-    await store.set(k("weird/key :%"), 1);
-    if ((await store.get(k("weird/key :%"))) !== 1) problems.push("keys may contain any characters");
-    await store.set(outside, 1);
-    const keys = (await store.keys(prefix)).sort();
+    if (!same(await s.get(k("a")), fresh())) found.push("get() must return a copy: changing what it returned changed the stored value");
+    await s.set(k("a"), "overwritten");
+    if ((await s.get(k("a"))) !== "overwritten") found.push("set() should overwrite an existing key");
+    await s.set(k("b"), 0);
+    if ((await s.get(k("b"))) !== 0) found.push("falsy values such as 0 must be stored");
+    await s.set(k("weird/key :%"), 1);
+    if ((await s.get(k("weird/key :%"))) !== 1) found.push("keys may contain any characters");
+    await s.set(outside, 1);
+    const keys = (await s.keys(prefix)).sort();
     const want = [k("a"), k("b"), k("weird/key :%")].sort();
-    if (!same(keys, want)) problems.push(`keys(prefix) returned ${JSON.stringify(keys)}, expected ${JSON.stringify(want)} (only keys that start with the prefix)`);
-    await store.delete(k("a"));
-    if ((await store.get(k("a"))) !== undefined) problems.push("delete() did not remove the key");
-    await store.delete(k("never-set")); // must not throw
-    if (store.lock) {
+    if (!same(keys, want)) found.push(`keys(prefix) returned ${JSON.stringify(keys)}, expected ${JSON.stringify(want)} (only keys that start with the prefix)`);
+    await s.delete(k("a"));
+    if ((await s.get(k("a"))) !== undefined) found.push("delete() did not remove the key");
+    await s.delete(k("never-set")); // must not throw
+    if (s.lock) {
       let active = 0;
       let overlap = false;
       const work = () =>
-        store.lock!(k("lock"), async () => {
+        s.lock!(k("lock"), async () => {
           active++;
           if (active > 1) overlap = true;
           await new Promise((r) => setTimeout(r, 10));
           active--;
         });
       await Promise.all([work(), work(), work()]);
-      if (overlap) problems.push("lock() let two callers in at once");
+      if (overlap) found.push("lock() let two callers in at once");
     }
   };
   const timeoutMs = opts.timeoutMs ?? 10_000;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const running = checks();
   try {
     await Promise.race([
-      checks(),
+      running,
       new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error(`did not finish within ${timeoutMs} ms (a call never settled)`)), timeoutMs);
       }),
     ]);
+    problems.push(...found);
   } catch (e) {
+    abandoned = true;
+    problems.push(...found);
     problems.push(`threw: ${e instanceof Error ? e.message : String(e)}`);
+    running.catch(() => {}).finally(cleanup);
   } finally {
     clearTimeout(timer);
-    for (const key of written) await store.delete(key).catch(() => {});
+    await cleanup();
   }
   return problems;
 }

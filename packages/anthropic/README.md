@@ -1,6 +1,6 @@
 # nanoharness-anthropic
 
-The [Anthropic](https://www.anthropic.com) model adapter for [nanoharness](https://www.npmjs.com/package/nanoharness). It is a separate package so the core `nanoharness` package contains no network code.
+The [Anthropic](https://www.anthropic.com) model adapter for [nanoharness](https://www.npmjs.com/package/nanoharness). It is `anthropicCompatible` from the core with the official URL and the global `fetch` filled in, kept separate so the core never uses the network by itself. If you would rather not install it, `anthropicCompatible` from `nanoharness` does the same with the `fetch` and `baseUrl` you pass.
 
 ```sh
 npm install nanoharness nanoharness-anthropic
@@ -21,6 +21,7 @@ const { finalText } = await run({
 | `apiKey` | Required. |
 | `model` | Default `claude-sonnet-5-5`. |
 | `maxTokens` | Default `4096`. |
+| `headers` | Extra headers on every request, such as a gateway header. They can replace the default ones. |
 | `maxRetries` | Retries for HTTP 408, 429, 500, 502, 503, 504 and 529, with backoff that honours `retry-after` (seconds or an HTTP date). Default `2`. |
 | `baseUrl` | Where requests, and so the API key, are sent. Must be `https` (`http` only for `localhost`) and must not contain credentials. Default `https://api.anthropic.com`. |
 | `fetch` | A custom `fetch`, for proxies or tests. Defaults to the global `fetch`. |
