@@ -10,6 +10,8 @@ export interface ToolUseBlock {
   input: Record<string, unknown>;
   /** Set by an adapter when the provider's tool call was malformed. The tool is not run and the model is told. */
   error?: string;
+  /** Opaque data a provider needs sent back with this call, such as Gemini's thought signature. Kept in the history. */
+  signature?: string;
 }
 
 export interface ToolResultBlock {

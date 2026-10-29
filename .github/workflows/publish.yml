@@ -1,10 +1,10 @@
 name: Publish
 
-# One tag per package: v1.2.3 (core), anthropic-v1.2.3, openai-v1.2.3, fs-v1.2.3.
+# One tag per package: v1.2.3 (core), anthropic-v1.2.3, openai-v1.2.3, gemini-v1.2.3, fs-v1.2.3.
 # Each package must have this repository and workflow set as a trusted publisher on npm.
 on:
   push:
-    tags: ["v*", "anthropic-v*", "openai-v*", "fs-v*"]
+    tags: ["v*", "anthropic-v*", "openai-v*", "gemini-v*", "fs-v*"]
 
 permissions:
   contents: read
@@ -24,6 +24,7 @@ jobs:
           case "$GITHUB_REF_NAME" in
             anthropic-v*) dir=packages/anthropic; ver="${GITHUB_REF_NAME#anthropic-v}" ;;
             openai-v*)    dir=packages/openai;    ver="${GITHUB_REF_NAME#openai-v}" ;;
+            gemini-v*)    dir=packages/gemini;    ver="${GITHUB_REF_NAME#gemini-v}" ;;
             fs-v*)        dir=packages/fs;        ver="${GITHUB_REF_NAME#fs-v}" ;;
             v*)           dir=.;                  ver="${GITHUB_REF_NAME#v}" ;;
           esac

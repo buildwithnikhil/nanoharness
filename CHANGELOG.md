@@ -4,10 +4,11 @@ All notable changes are listed here. This project follows [semantic versioning](
 
 ## 2.1.0 (unreleased)
 
-Everything here is opt-in and adds no dependencies. The core still never uses the network or the filesystem by itself. Released together with `nanoharness-anthropic` 1.1.0 and `nanoharness-openai` 1.1.0 (streaming and `AdapterError`); publish the core first, since both need it.
+Everything here is opt-in and adds no dependencies. The core still never uses the network or the filesystem by itself. Released together with `nanoharness-anthropic` 1.1.0, `nanoharness-openai` 1.1.0 (streaming and `AdapterError`) and the new `nanoharness-gemini` 1.0.0; publish the core first, since all three need it.
 
 ### Added
 - **Streaming.** `streaming: true` on `run`, `stream` and `defineAgent` uses the adapter's new optional `stream` method and emits `text_delta` events. `nanoharness-anthropic` and `nanoharness-openai` both stream.
+- **Google Gemini.** `geminiCompatible` in the core and the new `nanoharness-gemini` package support the Gemini API and Vertex AI: tool calls with the full JSON Schema, streaming, thinking-token usage, and thought signatures kept with each tool call (a new optional `signature` field on `ToolUseBlock`) and sent back, as Gemini's thinking models require.
 - **The core works on its own.** `openaiCompatible({ baseUrl, model, fetch })` and `anthropicCompatible(...)` connect to any server that speaks the OpenAI Chat Completions or the Anthropic Messages format: Ollama, vLLM, LM Studio, OpenRouter, a gateway, or your own. You pass the `fetch`, so the core still never uses the network by itself. Options include `apiKey`, extra `headers`, `name` for error messages, and `allowInsecureHttp` for a LAN server. The companion packages are now thin wrappers that fill in the official URL and the global `fetch`; their options and behaviour are unchanged, and both gain `headers`.
 - **Custom models.**
   - `promptAdapter({ generate })` gives tool calling to any text-in, text-out model. The transcript it sends writes each message as a JSON string, so tool output cannot pose as a user turn.
